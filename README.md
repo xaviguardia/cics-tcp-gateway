@@ -20,6 +20,9 @@ TCP Client  --TCP-->  CICSGW ASM via X'75'  --next-->  KICKS Program
 TCP Client  --TCP-->  KICKGWX KGCC via X75CALL  -->  kickgw()
   request              MVS address space              KIKPCP LINK once
   response                                          KICKS state is ready
+
+TCP Clients --TCP--> host-gateway acceptor/proxy --> KICKGWX worker pool
+  many sessions        webserver-style frontend        isolated KICKS state
 ```
 
 KICKS dispatch target, from the KICKS source:
@@ -40,8 +43,8 @@ links, and runs as `PGM=KICKGW`.
 
 `jcl/KICKGWX.jcl` verifies the combined KGCC-hosted TCP gateway. It assembles
 `src/X75CALL.asm`, compiles `src/KICKGWX.c`, links both into `KICKGWX`, binds
-`0.0.0.0:4321`, accepts a binary request, and returns a gateway response from
-the `kickgw()` dispatch guard.
+`0.0.0.0:4321`, accepts TCP sessions, loops over framed binary requests on the
+same socket, and returns gateway responses from the `kickgw()` dispatch guard.
 
 ## Protocol
 
@@ -90,6 +93,17 @@ Build and run the KGCC-hosted TCP gateway:
 awk '{gsub(/\r/,""); print}' jcl/KICKGWX.jcl | nc localhost 3505
 ```
 
+Run the host-side acceptor/proxy in front of one or more KICKGWX workers:
+
+```bash
+node src/host-gateway.js --host=0.0.0.0 --port=4321 \
+  --backend=127.0.0.1:4322 --backend=127.0.0.1:4323
+```
+
+Each backend is a full TCP session target. The frontend does not split a user
+session across workers; it selects a worker when the client connects and then
+proxies the byte stream.
+
 ## Test
 
 ```bash
@@ -132,11 +146,23 @@ KICKGWX LKED   IEWL         RC=0000
 Request KLASTCCG + 4-byte commarea:
 response hex = 00000000 00000004 00000000
 rc=0, output length=4
+
+Same TCP session, two KLASTCCG frames:
+response hex = 000000000000000400000000000000000000000400000000
 ```
 
 This verifies the TCP bind/listen/accept/recv/send path, KICKS-style
 CSA/TCA/EIB initialization, and `KIKPCP LINK` dispatch into a real program from
 `KIKRPL`.
+
+Verified host acceptor/proxy:
+
+```text
+3 concurrent frontend clients -> proxy -> backend:
+client-0
+client-1
+client-2
+```
 
 ## Configuration
 
@@ -160,9 +186,10 @@ The verified gateway uses the Hercules X'75' TCPIP sequence from inside MVS:
 3. **BIND** - Bind `0.0.0.0:4321`.
 4. **LISTEN** - Listen with backlog 5.
 5. **ACCEPT** - Accept each client connection.
-6. **RECV** - Read the gateway request bytes.
+6. **RECV** - Read a full request header and commarea.
 7. **SEND** - Return `rc + output length + EBCDIC output`.
-8. **CLOSE** - Close the client socket and return to accept.
+8. Repeat RECV/SEND on the same client socket until EOF/error.
+9. **CLOSE** - Close the client socket and return to accept.
 
 ## Limitations
 
@@ -172,6 +199,12 @@ The verified gateway uses the Hercules X'75' TCPIP sequence from inside MVS:
   `HERC01.KICKSSYS.V1R5M0.SKIKLOAD`, plus RUN DDs for `SKIKLOAD` and `KIKRPL`.
 - The current Docker container publishes 3270/3505/8038 only. Port 4321 is
   reachable inside the container network; publish or proxy it for host access.
+- `KICKGWX` is session-persistent but still processes accepted clients serially
+  inside one MVS address space. Webserver-style simultaneous multi-user
+  operation is provided by running multiple independent `KICKGWX` workers and
+  putting `src/host-gateway.js` in proxy mode in front of them.
+- `KICKGWX` accepts a decimal port as its first program argument/JCL `PARM`;
+  the default JCL uses `PARM='4321'`.
 - No TLS/encryption (plaintext TCP)
 
 ## Files

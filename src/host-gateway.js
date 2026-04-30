@@ -42,6 +42,35 @@ function argValue(name, fallback) {
   return arg ? arg.slice(prefix.length) : fallback;
 }
 
+function argValues(name) {
+  const prefix = `--${name}=`;
+  return process.argv
+    .filter((item) => item.startsWith(prefix))
+    .map((item) => item.slice(prefix.length));
+}
+
+function parseBackends() {
+  const values = [...argValues('backend')];
+  const backendsValue = argValue('backends', '');
+  if (backendsValue) {
+    values.push(...backendsValue.split(','));
+  }
+
+  return values
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .map((value) => {
+      const index = value.lastIndexOf(':');
+      const host = index >= 0 ? value.slice(0, index) : '127.0.0.1';
+      const portText = index >= 0 ? value.slice(index + 1) : value;
+      const port = Number.parseInt(portText, 10);
+      if (!host || !Number.isInteger(port) || port < 1 || port > 65535) {
+        throw new Error(`Invalid backend: ${value}`);
+      }
+      return { host, port };
+    });
+}
+
 function asciiToEbcdic(value) {
   const source = Buffer.from(value, 'ascii');
   const out = Buffer.alloc(source.length);
@@ -75,28 +104,35 @@ function runProgram(programName, commarea) {
   };
 }
 
-function handleClient(socket) {
+function handleMockClient(socket) {
   let buffer = Buffer.alloc(0);
   let expectedLength = null;
 
   socket.on('data', (chunk) => {
     buffer = Buffer.concat([buffer, chunk]);
 
-    if (expectedLength === null && buffer.length >= HEADER_SIZE) {
-      const commareaLength = buffer.readUInt32BE(8);
-      if (commareaLength > MAX_COMMAREA) {
-        socket.end(buildResponse(12, 'CICSGW: BAD COMMAREA LENGTH'));
-        return;
+    while (true) {
+      if (expectedLength === null && buffer.length >= HEADER_SIZE) {
+        const commareaLength = buffer.readUInt32BE(8);
+        if (commareaLength > MAX_COMMAREA) {
+          socket.end(buildResponse(12, 'CICSGW: BAD COMMAREA LENGTH'));
+          return;
+        }
+        expectedLength = HEADER_SIZE + commareaLength;
       }
-      expectedLength = HEADER_SIZE + commareaLength;
-    }
 
-    if (expectedLength !== null && buffer.length >= expectedLength) {
+      if (expectedLength === null || buffer.length < expectedLength) {
+        break;
+      }
+
       const request = buffer.slice(0, expectedLength);
+      buffer = buffer.slice(expectedLength);
+      expectedLength = null;
+
       const programName = ebcdicToAscii(request.slice(0, 8)).trimEnd();
       const commarea = request.slice(HEADER_SIZE);
       const response = runProgram(programName, commarea);
-      socket.end(buildResponse(response.rc, response.output));
+      socket.write(buildResponse(response.rc, response.output));
     }
   });
 
@@ -105,15 +141,63 @@ function handleClient(socket) {
   });
 }
 
+function makeProxyHandler(backends) {
+  let nextBackend = 0;
+
+  return function handleProxyClient(socket) {
+    const backend = backends[nextBackend % backends.length];
+    nextBackend += 1;
+
+    const upstream = net.createConnection({
+      host: backend.host,
+      port: backend.port,
+    });
+
+    socket.pipe(upstream, { end: false });
+    upstream.pipe(socket, { end: false });
+
+    socket.on('end', () => {
+      upstream.end();
+    });
+    upstream.on('end', () => {
+      socket.end();
+    });
+
+    socket.on('error', (err) => {
+      console.error(`CICSGW client error: ${err.message}`);
+      upstream.destroy();
+    });
+    upstream.on('error', (err) => {
+      console.error(
+        `CICSGW backend ${backend.host}:${backend.port} error: ${err.message}`,
+      );
+      socket.destroy();
+    });
+  };
+}
+
 const host = argValue('host', DEFAULT_HOST);
 const port = Number.parseInt(argValue('port', String(DEFAULT_PORT)), 10);
+let backends;
 
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
   console.error(`Invalid port: ${port}`);
   process.exit(2);
 }
 
-const server = net.createServer(handleClient);
+try {
+  backends = parseBackends();
+} catch (err) {
+  console.error(err.message);
+  process.exit(2);
+}
+
+const handler = backends.length > 0
+  ? makeProxyHandler(backends)
+  : handleMockClient;
+const server = backends.length > 0
+  ? net.createServer({ allowHalfOpen: true }, handler)
+  : net.createServer(handler);
 
 server.on('error', (err) => {
   console.error(`CICSGW host gateway bind failed on ${host}:${port}: ${err.message}`);
@@ -123,4 +207,11 @@ server.on('error', (err) => {
 server.listen({ host, port }, () => {
   const address = server.address();
   console.log(`CICSGW host gateway listening on ${address.address}:${address.port}`);
+  if (backends.length > 0) {
+    console.log(
+      `CICSGW proxy backends: ${backends
+        .map((backend) => `${backend.host}:${backend.port}`)
+        .join(', ')}`,
+    );
+  }
 });

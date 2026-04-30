@@ -23,6 +23,15 @@ Compilar y ejecutar el gateway TCP en ensamblador S/370 dentro de Hercules TK5, 
 - Verificado CICS gateway: llamada TCP binaria a `KLASTCCG` en `KIKRPL`
   devuelve `00000000 00000004 00000000` (`rc=0`, longitud 4, commarea
   devuelta).
+- Verificado modo sesion del gateway: una misma conexion TCP puede enviar dos
+  frames `KLASTCCG` seguidos y recibe dos respuestas seguidas:
+  `000000000000000400000000000000000000000400000000`.
+- `src/host-gateway.js` ahora puede actuar como acceptor/proxy tipo webserver:
+  acepta clientes concurrentes y asigna cada sesion completa a un backend
+  `KICKGWX` (`--backend=host:port`). Probado con 3 clientes concurrentes contra
+  un backend local.
+- `KICKGWX` acepta puerto decimal por `PARM`/primer argumento; el JCL verificado
+  usa `PARM='4321'`.
 
 ## Lo que falta
 
@@ -64,9 +73,14 @@ node test/test-gateway.js --host=localhost --port=4321
   programs siguiendo `KIKSIP1$`.
 - Crea TCA/EIB para cada request siguiendo `mak_tca()` de `KIKKCP1$`.
 - Invoca programas con `KIKPCP(csa, kikpcpLINK, pgm8, commarea, &len)`.
+- Mantiene la sesion TCP abierta y procesa multiples frames request/response
+  hasta EOF/error; ya no es una conexion por request.
 - El RUN necesita `STEPLIB`, `SKIKLOAD` y `KIKRPL` apuntando a las librerias
   KICKS; en este TK5 se instalaron tambien `KIKASRB`, `KIKLOAD` y `VCONSTB5`
   en `HERC01.KICKSSYS.V1R5M0.SKIKLOAD`.
+- Multiusuario simultaneo queda modelado como webserver: frontend acceptor/proxy
+  concurrente + pool de address spaces `KICKGWX` independientes. No se
+  comparten CSA/TCA/TCTTE entre usuarios dentro de una unica instancia KICKS.
 - La ruta de compilacion KGCC ya esta resuelta: `JOBPROC` debe apuntar a
   `HERC01.KICKSSYS.V1R5M0.PROCLIB`, `GCCPREF=SYS1`, `PDPPREF=PDPCLIB`,
   `COMP.INCLUDE` debe usar `HERC01.KICKSTS.H`,

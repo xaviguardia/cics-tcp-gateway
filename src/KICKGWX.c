@@ -14,7 +14,8 @@
 
 #include "kicks.h"
 
-#define GW_PORT_HEX 0x10E1
+#define GW_PORT_DEC 4321
+#define HDR_LEN 12
 #define MAX_REQ 4096
 #define RSP_LEN 29
 
@@ -363,16 +364,91 @@ static int put_response(int rc, char *commarea, int commarea_len)
     return 37;
 }
 
-int main(int argc, char **argv)
+static int recv_full(int fd, char *buf, int want)
 {
-    int i;
-    int lsnfd;
-    int clifd;
+    int got = 0;
+    int nread;
+
+    while (got < want) {
+        do {
+            nread = x75call(11, fd, want - got, buf + got,
+                            want - got, 2);
+        } while (nread == -2);
+        if (nread <= 0) {
+            return nread;
+        }
+        got += nread;
+    }
+    return got;
+}
+
+static void handle_client(int clifd)
+{
     int nread;
     int comalen;
     int rc;
 
-    printf("KICKGWX starting port 4321\n");
+    while (1) {
+        memset(reqbuf, 0, sizeof(reqbuf));
+        nread = recv_full(clifd, reqbuf, HDR_LEN);
+        if (nread != HDR_LEN) {
+            break;
+        }
+
+        memcpy(&comalen, reqbuf + 8, 4);
+        if (comalen < 0) {
+            rc = 12;
+            x75call(10, clifd, 0, rspbuf,
+                    put_response(rc, reqbuf + HDR_LEN, 0), 1);
+            printf("KICKGWX bad commarea length %d\n", comalen);
+            fflush(stdout);
+            break;
+        }
+        if (comalen > MAX_REQ) {
+            rc = 12;
+            x75call(10, clifd, 0, rspbuf,
+                    put_response(rc, reqbuf + HDR_LEN, 0), 1);
+            printf("KICKGWX bad commarea length %d\n", comalen);
+            fflush(stdout);
+            break;
+        }
+
+        nread = recv_full(clifd, reqbuf + HDR_LEN, comalen);
+        if (nread != comalen) {
+            break;
+        }
+
+        rc = kickgw(reqbuf, reqbuf + HDR_LEN, comalen);
+        x75call(10, clifd, 0, rspbuf,
+                put_response(rc, reqbuf + HDR_LEN, comalen), 1);
+        printf("KICKGWX request rc %d bytes %d\n",
+               rc, HDR_LEN + comalen);
+        fflush(stdout);
+    }
+}
+
+int main(int argc, char **argv)
+{
+    int i;
+    int port;
+    int lsnfd;
+    int clifd;
+    int rc;
+
+    port = GW_PORT_DEC;
+    if (argc > 1) {
+        port = atoi(argv[1]);
+    }
+    if (port < 1) {
+        printf("KICKGWX invalid port %d\n", port);
+        return 8;
+    }
+    if (port > 65535) {
+        printf("KICKGWX invalid port %d\n", port);
+        return 8;
+    }
+
+    printf("KICKGWX starting port %d\n", port);
     fflush(stdout);
 
     rc = x75call(1, 0, 0, 0, 0, 0);
@@ -388,7 +464,7 @@ int main(int argc, char **argv)
         return 8;
     }
 
-    rc = x75call((lsnfd << 16) + 6, 0, 0x00020000 + GW_PORT_HEX,
+    rc = x75call((lsnfd << 16) + 6, 0, 0x00020000 + port,
                  0, 0, 0);
     if (rc < 0) {
         printf("KICKGWX bind failed %d\n", rc);
@@ -408,21 +484,7 @@ int main(int argc, char **argv)
         if (clifd < 0) {
             continue;
         }
-
-        memset(reqbuf, 0, sizeof(reqbuf));
-        do {
-            nread = x75call(11, clifd, sizeof(reqbuf), reqbuf,
-                            sizeof(reqbuf), 2);
-        } while (nread == -2);
-        if (nread >= 12) {
-            memcpy(&comalen, reqbuf + 8, 4);
-            rc = kickgw(reqbuf, reqbuf + 12, comalen);
-            x75call(10, clifd, 0, rspbuf,
-                    put_response(rc, reqbuf + 12, comalen), 1);
-            printf("KICKGWX request rc %d bytes %d\n", rc, nread);
-            fflush(stdout);
-        }
-
+        handle_client(clifd);
         x75call(12, clifd, 0, 0, 0, 0);
     }
 
