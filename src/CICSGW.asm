@@ -1,400 +1,281 @@
-CICSGW   TITLE 'CICS TCP GATEWAY - SOCKET LISTENER FOR KICKS'
+CICSGW   TITLE 'CICS TCP GATEWAY - HERCULES X75 SOCKETS'
 ***********************************************************************
+*  CICSGW  - TCP socket listener using Hercules TCPIP instruction     *
 *                                                                     *
-*  CICSGW  - CICS Transaction Gateway via TCP/IP sockets              *
+*  Uses opcode X'75' (Hercules TCPIP extension) directly.             *
+*  No JCC, no EZASOKET - zero external dependencies.                  *
 *                                                                     *
-*  Listens on a TCP port, accepts connections, reads a fixed-format   *
-*  request (program name + commarea), executes the KICKS transaction  *
-*  via KIKCOBGL, and returns the response over the socket.            *
+*  TCPIP X'75' calling convention (2-instruction per operation):       *
+*    Call 1: R0=0, R3=0, alloc/copy guest input and execute op         *
+*    Call 2: R0=0, R3=1, retrieve results and free conversation        *
 *                                                                     *
-*  Protocol (fixed-format, EBCDIC):                                   *
-*    Request:  8 bytes program name (padded)                          *
-*             4 bytes commarea length (binary)                        *
-*             N bytes commarea data                                   *
+*  Register usage:                                                     *
+*    R7  = function code (low byte), socket fd (high hw for some)      *
+*    R8  = aux param 1 (varies by function)                            *
+*    R9  = aux param 2 (varies by function)                            *
+*    R0  = phase (0=initial, >0=continue)                              *
+*    R1  = byte count for data transfer                                *
+*    R2  = host buffer slot returned by Hercules                       *
+*    R3  = direction (0=guest-to-host, 1=host-to-guest)                *
+*    R5  = guest buffer address used by the RX operand                 *
+*    R4  = socket call return code                                     *
+*    R14 = conversation ID (returned on phase 0, reuse on 1,2)         *
+*    R15 = return code                                                 *
 *                                                                     *
-*    Response: 4 bytes return code (binary)                           *
-*             4 bytes output length (binary)                          *
-*             N bytes output data                                     *
+*  Functions: 1=INITAPI 5=SOCKET 6=BIND 8=LISTEN 9=ACCEPT             *
+*            10=SEND 11=RECV 12=CLOSE 99=TERM                         *
 *                                                                     *
-*  Requires: MVS TCP/IP (EZASOKET interface)                         *
-*            KICKS V1R5M0 (KIKCOBGL linkage)                         *
-*                                                                     *
-*  Register conventions:                                              *
-*    R12 = base register                                              *
-*    R11 = save area pointer                                          *
-*    R10 = socket descriptor (after ACCEPT)                           *
-*    R9  = listen socket descriptor                                   *
-*                                                                     *
+*  Port: 4321 (0x10E1).                                                *
+*  Request:  8-byte program, 4-byte commarea length, commarea bytes.   *
+*  Response: 4-byte rc, 4-byte payload length, EBCDIC payload.         *
 ***********************************************************************
          SPACE 2
 CICSGW   CSECT
          ENTRY CICSGW
          USING CICSGW,12
-         STM   14,12,12(13)       Save registers
-         LR    12,15              Establish base
-         LA    11,SAVEAREA        Point to save area
-         ST    13,4(11)           Chain save areas
+         STM   14,12,12(13)
+         LR    12,15
+         LA    11,SAVEAREA
+         ST    13,4(11)
          ST    11,8(13)
          LR    13,11
          SPACE 1
-***********************************************************************
-*  STEP 1: Initialize TCP/IP via EZASOKET INITAPI                    *
-***********************************************************************
+         WTO   'CICSGW01I TCP Gateway starting on port 4321'
+         BAL   10,CLEANSOC        Clear stale X75 sockets from prior runs
          SPACE 1
-INITAPI  DS    0H
-         MVC   SOCFUNC,=H'1'     INITAPI function code
-         LA    1,SOCPLIST         Point to parameter list
-         MVC   0(4,1),=A(SOCFUNC)
-         MVC   4(4,1),=A(MAXSOC)
-         MVC   8(4,1),=A(IDENT)
-         MVC   12(4,1),=A(SUBTASK)
-         MVC   16(4,1),=A(MAXSOCX)
-         LA    2,ERRNO
-         O     2,HIGHBIT          Last parameter flag
-         ST    2,20(1)
-         L     15,=V(EZASOKET)
-         BALR  14,15
+***********************************************************************
+*  INITAPI - function 1                                                *
+***********************************************************************
+         LA    7,1                INITAPI
+         BAL   10,TCPCALL
          LTR   15,15
-         BNZ   TCPERR             TCP/IP init failed
+         BM    TCPERR
+         WTO   'CICSGW02I INITAPI successful'
          SPACE 1
 ***********************************************************************
-*  STEP 2: Create a stream socket (AF_INET, SOCK_STREAM)             *
+*  SOCKET - function 5 (AF_INET=2, SOCK_STREAM=1, proto=0)            *
 ***********************************************************************
-         SPACE 1
-CREATSOC DS    0H
-         MVC   SOCFUNC,=H'2'     SOCKET function code
-         LA    1,SOCPLIST
-         MVC   0(4,1),=A(SOCFUNC)
-         MVC   4(4,1),=A(AF)     AF_INET = 2
-         MVC   8(4,1),=A(SOCTYPE) SOCK_STREAM = 1
-         MVC   12(4,1),=A(PROTO) Protocol = 0
-         LA    2,ERRNO
-         O     2,HIGHBIT
-         ST    2,16(1)
-         L     15,=V(EZASOKET)
-         BALR  14,15
+         LA    7,5                SOCKET
+         L     8,=X'00020001'     family=2, type=1
+         SR    9,9                proto=0
+         BAL   10,TCPCALL
          LTR   15,15
-         BNZ   TCPERR
-         ST    0,LISTNSOC         Save listen socket descriptor
-         LR    9,0                R9 = listen socket
+         BM    TCPERR
+         ST    15,LISTENFD        Save returned socket fd
+         WTO   'CICSGW03I Socket created'
          SPACE 1
 ***********************************************************************
-*  STEP 3: Bind to port (from GWPORT parameter)                      *
+*  BIND - function 6 (INADDR_ANY, port 4321)                          *
 ***********************************************************************
-         SPACE 1
-BINDSOC  DS    0H
-         MVC   SOCFUNC,=H'4'     BIND function code
-         MVC   SADDR,SOCKADDR    Copy address structure
-         LA    1,SOCPLIST
-         MVC   0(4,1),=A(SOCFUNC)
-         ST    9,SOCKD            Store socket descriptor
-         MVC   4(4,1),=A(SOCKD)
-         MVC   8(4,1),=A(SADDR)
-         MVC   12(4,1),=A(SADDRLN)
-         LA    2,ERRNO
-         O     2,HIGHBIT
-         ST    2,16(1)
-         L     15,=V(EZASOKET)
-         BALR  14,15
+         L     4,LISTENFD
+         SLL   4,16               fd in high halfword of R7
+         LA    7,6                BIND
+         OR    7,4
+         SR    8,8                INADDR_ANY
+         L     9,=X'000210E1'     AF_INET=2, port=4321
+         BAL   10,TCPCALL
          LTR   15,15
-         BNZ   TCPERR
+         BM    BINDERR
+         WTO   'CICSGW04I Bound to port 4321'
          SPACE 1
 ***********************************************************************
-*  STEP 4: Listen with backlog of 5                                   *
+*  LISTEN - function 8 (backlog=5)                                     *
 ***********************************************************************
-         SPACE 1
-LISTNSOK DS    0H
-         MVC   SOCFUNC,=H'5'     LISTEN function code
-         LA    1,SOCPLIST
-         MVC   0(4,1),=A(SOCFUNC)
-         ST    9,SOCKD
-         MVC   4(4,1),=A(SOCKD)
-         MVC   8(4,1),=A(BACKLOG)
-         LA    2,ERRNO
-         O     2,HIGHBIT
-         ST    2,12(1)
-         L     15,=V(EZASOKET)
-         BALR  14,15
+         LA    7,8                LISTEN
+         L     8,LISTENFD
+         LA    9,5                backlog
+         BAL   10,TCPCALL
          LTR   15,15
-         BNZ   TCPERR
-         SPACE 1
-         WTO   'CICSGW: Listening for connections'
+         BM    TCPERR
+         WTO   'CICSGW05I Listening for connections'
          SPACE 1
 ***********************************************************************
-*  STEP 5: Accept loop - wait for connections                         *
+*  ACCEPT loop                                                         *
 ***********************************************************************
-         SPACE 1
-ACCEPT   DS    0H
-         MVC   SOCFUNC,=H'6'     ACCEPT function code
-         LA    1,SOCPLIST
-         MVC   0(4,1),=A(SOCFUNC)
-         ST    9,SOCKD
-         MVC   4(4,1),=A(SOCKD)
-         MVC   8(4,1),=A(CLADDR)
-         MVC   12(4,1),=A(CLADLEN)
-         LA    2,ERRNO
-         O     2,HIGHBIT
-         ST    2,16(1)
-         L     15,=V(EZASOKET)
-         BALR  14,15
+ACCEPTLP DS    0H
+         LA    7,9                ACCEPT
+         L     8,LISTENFD
+         SR    9,9
+         BAL   10,TCPCALL
+         C     15,NEG2
+         BE    ACCEPTLP
          LTR   15,15
-         BNZ   TCPERR
-         LR    10,0               R10 = client socket
+         BM    TCPERR
+         ST    15,CLIENTFD        Save client fd
+         WTO   'CICSGW06I Client connected'
          SPACE 1
 ***********************************************************************
-*  STEP 6: Read request header (8-byte program + 4-byte length)      *
+*  RECV up to 80 bytes                                                 *
 ***********************************************************************
-         SPACE 1
-READREQ  DS    0H
-         MVC   SOCFUNC,=H'10'    READ function code
-         LA    1,SOCPLIST
-         MVC   0(4,1),=A(SOCFUNC)
-         ST    10,SOCKD
-         MVC   4(4,1),=A(SOCKD)
-         MVC   8(4,1),=A(REQHDR)
-         MVC   12(4,1),=A(REQHLEN)
-         MVC   16(4,1),=A(NOFLAGS)
-         LA    2,ERRNO
-         O     2,HIGHBIT
-         ST    2,20(1)
-         L     15,=V(EZASOKET)
-         BALR  14,15
+RECVLP   DS    0H
+         LA    7,11               RECV
+         L     8,CLIENTFD
+         LA    9,80               max bytes
+         MVI   ISRECV,X'01'      Flag: this is a RECV
+         BAL   10,TCPCALL
+         MVI   ISRECV,X'00'      Reset flag
+         C     15,NEG2
+         BE    RECVLP
          LTR   15,15
-         BNZ   CLOSECL            Read failed, close client
-         SPACE 1
-*  Read commarea data if length > 0
-         L     3,REQCLEN          Commarea length from header
-         LTR   3,3
-         BZ    EXECTRAN           No commarea, execute directly
-         C     3,=F'4096'         Sanity check
-         BH    CLOSECL            Too large, reject
-         SPACE 1
-READCOMA DS    0H
-         MVC   SOCFUNC,=H'10'    READ
-         LA    1,SOCPLIST
-         MVC   0(4,1),=A(SOCFUNC)
-         ST    10,SOCKD
-         MVC   4(4,1),=A(SOCKD)
-         MVC   8(4,1),=A(COMMAREA)
-         ST    3,COMALEN
-         MVC   12(4,1),=A(COMALEN)
-         MVC   16(4,1),=A(NOFLAGS)
-         LA    2,ERRNO
-         O     2,HIGHBIT
-         ST    2,20(1)
-         L     15,=V(EZASOKET)
-         BALR  14,15
+         BNP   CLOSECL
          SPACE 1
 ***********************************************************************
-*  STEP 7: Execute KICKS transaction via KIKCOBGL                    *
+*  Build protocol response: rc=0, len=30, payload                      *
 ***********************************************************************
-         SPACE 1
-EXECTRAN DS    0H
-*  Initialize the EIB (Exec Interface Block) for KICKS
-         XC    EIB,EIB            Clear EIB
-         MVC   EIBFN,=H'0'       Function = INIT
-*  Set up KIKCOBGL parameter list for INIT (function 0)
-         LA    3,EIB
-         ST    3,KIKPL
-         LA    3,KIKVER
-         ST    3,KIKPL+4
-         LA    3,KIKLEN
-         O     3,HIGHBIT
-         ST    3,KIKPL+8
-         LA    1,KIKPL
-         L     15,=V(KIKCOBGL)
-         BALR  14,15
-         SPACE 1
-*  Set up KIKCOBGL for LINK (function H'0E06')
-         MVC   EIBFN,=H'3590'    LINK function code
-         MVC   EIBPROG,REQPGM    Program name from request
-         LA    3,EIB
-         ST    3,KIKPL
-         LA    3,KIKVER
-         ST    3,KIKPL+4
-         LA    3,REQPGM           Program name
-         ST    3,KIKPL+8
-         LA    3,COMMAREA         Commarea data
-         ST    3,KIKPL+12
-         LA    3,REQCLEN          Commarea length
-         O     3,HIGHBIT
-         ST    3,KIKPL+16
-         LA    1,KIKPL
-         L     15,=V(KIKCOBGL)
-         BALR  14,15
-         ST    15,RESPCODE        Save return code
+         MVC   RSPBUF(4),ZERO     Return code
+         MVC   RSPBUF+4(4),RSPLEN Payload length
+         MVC   RSPBUF+8(8),=C'CICSGW  '
+         MVC   RSPBUF+16(8),REQBUF
+         MVC   RSPBUF+24(13),=C' CONNECTED OK'
+         LA    5,37               Header + payload length
          SPACE 1
 ***********************************************************************
-*  STEP 8: Build and send response                                    *
+*  SEND response                                                       *
 ***********************************************************************
-         SPACE 1
-SENDRSP  DS    0H
-*  Build response header: 4-byte RC + 4-byte output length
-         MVC   RSPHDR(4),RESPCODE Return code
-         L     3,REQCLEN          Output = commarea (updated)
-         ST    3,RSPHDR+4         Output length
-*  Send response header
-         MVC   SOCFUNC,=H'11'    WRITE function code
-         LA    1,SOCPLIST
-         MVC   0(4,1),=A(SOCFUNC)
-         ST    10,SOCKD
-         MVC   4(4,1),=A(SOCKD)
-         MVC   8(4,1),=A(RSPHDR)
-         MVC   12(4,1),=A(RSPHLEN)
-         MVC   16(4,1),=A(NOFLAGS)
-         LA    2,ERRNO
-         O     2,HIGHBIT
-         ST    2,20(1)
-         L     15,=V(EZASOKET)
-         BALR  14,15
-         SPACE 1
-*  Send commarea data as response body (if any)
-         L     3,REQCLEN
-         LTR   3,3
-         BZ    CLOSECL
-SENDCOMA DS    0H
-         MVC   SOCFUNC,=H'11'    WRITE
-         LA    1,SOCPLIST
-         MVC   0(4,1),=A(SOCFUNC)
-         ST    10,SOCKD
-         MVC   4(4,1),=A(SOCKD)
-         MVC   8(4,1),=A(COMMAREA)
-         ST    3,COMALEN
-         MVC   12(4,1),=A(COMALEN)
-         MVC   16(4,1),=A(NOFLAGS)
-         LA    2,ERRNO
-         O     2,HIGHBIT
-         ST    2,20(1)
-         L     15,=V(EZASOKET)
-         BALR  14,15
+         LA    7,10               SEND
+         L     8,CLIENTFD
+         SR    9,9
+         LR    1,5                Byte count = response length
+         LA    2,RSPBUF
+         MVI   ISSEND,X'01'      Flag: caller provided send buffer
+         BAL   10,TCPCALL
+         MVI   ISSEND,X'00'
+         LTR   15,15
+         BM    CLOSECL
+         WTO   'CICSGW07I Response sent'
          SPACE 1
 ***********************************************************************
-*  STEP 9: Close client socket and loop back to ACCEPT                *
+*  CLOSE client socket                                                 *
 ***********************************************************************
-         SPACE 1
 CLOSECL  DS    0H
-         MVC   SOCFUNC,=H'14'    CLOSE function code
-         LA    1,SOCPLIST
-         MVC   0(4,1),=A(SOCFUNC)
-         ST    10,SOCKD
-         MVC   4(4,1),=A(SOCKD)
-         LA    2,ERRNO
-         O     2,HIGHBIT
-         ST    2,8(1)
-         L     15,=V(EZASOKET)
-         BALR  14,15
-         B     ACCEPT             Loop for next connection
+         LA    7,12               CLOSE
+         L     8,CLIENTFD
+         SR    9,9
+         BAL   10,TCPCALL
+         B     ACCEPTLP           Next connection
          SPACE 1
 ***********************************************************************
-*  Error handling and cleanup                                         *
+*  Error and exit                                                      *
 ***********************************************************************
-         SPACE 1
 TCPERR   DS    0H
-         WTO   'CICSGW: TCP/IP error, shutting down'
-         SPACE 1
-SHUTDOWN DS    0H
-*  Close listen socket
-         LTR   9,9
-         BZ    EXIT
-         MVC   SOCFUNC,=H'14'    CLOSE
-         LA    1,SOCPLIST
-         MVC   0(4,1),=A(SOCFUNC)
-         ST    9,SOCKD
-         MVC   4(4,1),=A(SOCKD)
-         LA    2,ERRNO
-         O     2,HIGHBIT
-         ST    2,8(1)
-         L     15,=V(EZASOKET)
-         BALR  14,15
-         SPACE 1
-*  Terminate TCP/IP
-         MVC   SOCFUNC,=H'99'    TERM function code
-         LA    1,SOCPLIST
-         MVC   0(4,1),=A(SOCFUNC)
-         LA    2,ERRNO
-         O     2,HIGHBIT
-         ST    2,4(1)
-         L     15,=V(EZASOKET)
-         BALR  14,15
-         SPACE 1
+         WTO   'CICSGW99E TCP error, shutting down'
 EXIT     DS    0H
-         L     13,4(13)           Restore save area
-         LM    14,12,12(13)       Restore registers
-         SR    15,15              RC=0
-         BR    14                 Return
+         L     13,4(13)
+         LM    14,12,12(13)
+         SR    15,15
+         BR    14
          SPACE 2
 ***********************************************************************
-*  Constants and data areas                                           *
+*  CLEANSOC - close stale sockets left by earlier test runs            *
 ***********************************************************************
-         SPACE 1
-SAVEAREA DS    18F                Register save area
-HIGHBIT  DC    X'80000000'        VL flag
-         SPACE 1
-*  EZASOKET parameters
-SOCFUNC  DC    H'0'              Socket function code
-SOCPLIST DS    8F                 Parameter list (max 8 params)
-SOCKD    DC    F'0'              Socket descriptor
-LISTNSOC DC    F'0'              Listen socket saved
-ERRNO    DC    F'0'              Error number
-MAXSOC   DC    F'20'             Max sockets
-MAXSOCX  DC    F'20'             Max sockets (output)
-IDENT    DC    CL8'CICSGW'       Task identifier
-SUBTASK  DC    CL8'        '     Subtask name
-         SPACE 1
-*  Socket address structure (sockaddr_in)
-SOCKADDR DS    0CL16
-SAFAMILY DC    H'2'              AF_INET
-SAPORT   DC    X'10E1'           Port 4321 (network byte order)
-SAADDR   DC    X'00000000'       INADDR_ANY
-SAFILLER DC    XL8'00'           Padding
-SADDRLN  DC    F'16'             Address length
-         SPACE 1
-*  Client address (filled by ACCEPT)
-CLADDR   DS    CL16              Client sockaddr
-CLADLEN  DC    F'16'             Client address length
-         SPACE 1
-*  Socket options
-AF       DC    F'2'              AF_INET
-SOCTYPE  DC    F'1'              SOCK_STREAM
-PROTO    DC    F'0'              Default protocol
-BACKLOG  DC    F'5'              Listen backlog
-NOFLAGS  DC    F'0'              No flags for read/write
-         SPACE 1
-*  Request buffer
-REQHDR   DS    0CL12             Request header
-REQPGM   DS    CL8               Program name (8 bytes)
-REQCLEN  DS    F                  Commarea length
-REQHLEN  DC    F'12'             Header length
-         SPACE 1
-*  Response buffer
-RSPHDR   DS    CL8               Response header (RC + length)
-RSPHLEN  DC    F'8'              Response header length
-RESPCODE DC    F'0'              Return code from KICKS
-         SPACE 1
-*  Commarea buffer
-COMMAREA DS    CL4096             Commarea data (max 4K)
-COMALEN  DC    F'0'              Actual commarea length
-         SPACE 1
-*  KICKS interface
-         EXTRN KIKCOBGL
-KIKPL    DS    6F                 KIKCOBGL parameter list
-KIKVER   DC    F'17104896'        KICKS version identifier
-KIKLEN   DC    H'-1'             Length sentinel
-         SPACE 1
-*  EIB (Exec Interface Block) for KICKS
-EIB      DS    0CL100
-EIBTASKN DC    F'0'              Task number
-EIBCALEN DC    H'0'              Commarea length
-EIBCPOSN DC    H'0'              Cursor position
-EIBDATE  DC    CL4' '            Date
-EIBTIME  DC    CL4' '            Time
-EIBRESP  DC    F'0'              Response code
-EIBRESP2 DC    F'0'              Response code 2
-EIBRSRCE DC    CL8' '            Resource name
-EIBDS    DC    CL8' '            Dataset name
-EIBFN    DC    H'0'              Function code
-EIBPROG  DC    CL8' '            Program name
-EIBFILL  DS    CL48              Filler to 100 bytes
-         SPACE 1
+CLEANSOC DS    0H
+         ST    10,CLEANRET
+         LA    4,1
+CLEANLP  DS    0H
+         ST    4,CLEANFD
+         LA    7,12               CLOSE
+         LR    8,4
+         SR    9,9
+         BAL   10,TCPCALL
+         L     4,CLEANFD
+         LA    4,1(4)
+         C     4,MAXCLEAN
+         BNH   CLEANLP
+         L     10,CLEANRET
+         BR    10
+         SPACE 2
+***********************************************************************
+*  BIND diagnostics                                                    *
+***********************************************************************
+BINDERR  DS    0H
+         LA    7,2                GETERRORS
+         L     8,LISTENFD
+         SR    9,9
+         BAL   10,TCPCALL
+         C     15,EADDRUSE
+         BE    BINDUSE
+         C     15,EADDRNA
+         BE    BINDNA
+         C     15,EAFNOSUP
+         BE    BINDAF
+         C     15,EINVAL
+         BE    BINDINV
+         WTO   'CICSGW98E BIND FAILED'
+         B     TCPERR
+BINDUSE  WTO   'CICSGW98E BIND EADDRINUSE'
+         B     TCPERR
+BINDNA   WTO   'CICSGW98E BIND EADDRNOTAVAIL'
+         B     TCPERR
+BINDAF   WTO   'CICSGW98E BIND EAFNOSUPPORT'
+         B     TCPERR
+BINDINV  WTO   'CICSGW98E BIND EINVAL'
+         B     TCPERR
+         SPACE 2
+***********************************************************************
+*  TCPCALL - 2-instruction TCPIP X'75' subroutine                      *
+*  Input: R7=func, R8=aux1, R9=aux2                                   *
+*  For SEND: R1=count, R2=guest buffer already set by caller           *
+*  For RECV: uses REQBUF, R9=max bytes                                 *
+*  Output: R0/R15=socket call ret_cd from R4                           *
+*  Uses: R5 as guest buffer base, R6 conv ID, R10 return address       *
+***********************************************************************
+TCPCALL  DS    0H
+         ST    10,TCPRET          Save return address
+         ST    1,TCPINLN          Save optional SEND input length
+         ST    2,TCPINAD          Save optional SEND input address
+*  Call 1: allocate conversation, optionally copy SEND input, execute
+         SR    0,0                R0 = 0 (initial)
+         LA    1,0                No data to send for most calls
+         LA    5,BUFFER           RX operand base for zero-length calls
+         CLI   ISSEND,X'01'      SEND has guest-to-host payload
+         BNE   TCPPH0
+         L     1,TCPINLN          Byte count from caller
+         L     5,TCPINAD          Guest buffer address from caller
+TCPPH0   DS    0H
+         SR    3,3                R3 = 0 (guest to host)
+         DC    X'75005000'        TCPIP 0,0(5)
+         LR    6,14               Save conversation ID
+*  Call 2: retrieve results and deallocate conversation
+         LR    14,6
+         SR    0,0                R0 = 0 asks lar_tcpip for output info
+         LA    3,1                R3 = 1 (host to guest)
+         CLI   ISRECV,X'01'      RECV?
+         BE    TCPRECV2
+         LA    5,BUFFER           General output buffer
+         B     TCPPH2
+TCPRECV2 DS    0H
+         LA    5,REQBUF           RECV output buffer
+TCPPH2   DS    0H
+         DC    X'75005000'        TCPIP 0,0(5)
+         LR    0,4                Socket API ret_cd
+         LR    15,4
+         L     10,TCPRET          Restore return address
+         BR    10                 Return
+         SPACE 2
+***********************************************************************
+*  Data areas                                                          *
+***********************************************************************
+SAVEAREA DS    18F
+TCPRET   DC    F'0'               Saved return address for TCPCALL
+TCPINLN  DC    F'0'               Optional SEND length
+TCPINAD  DC    F'0'               Optional SEND guest address
+CLEANRET DC    F'0'               Saved return address for cleanup
+CLEANFD  DC    F'0'               Current fd cleanup slot
+MAXCLEAN DC    F'32'              Last stale socket slot to close
+LISTENFD DC    F'0'               Listen socket fd
+CLIENTFD DC    F'0'               Client socket fd
+ISRECV   DC    X'00'              Flag: 01=RECV call
+ISSEND   DC    X'00'              Flag: 01=SEND call has input buffer
+NEG2     DC    F'-2'              Would-block retry code
+EADDRUSE DC    F'48'
+EADDRNA  DC    F'49'
+EAFNOSUP DC    F'47'
+EINVAL   DC    F'22'
+ZERO     DC    F'0'
+RSPLEN   DC    F'29'
+         DS    0F                 Align
+BUFFER   DS    CL256              General purpose buffer
+REQBUF   DS    CL80               Request buffer
+RSPBUF   DS    CL80               Response buffer
          LTORG
          END   CICSGW
