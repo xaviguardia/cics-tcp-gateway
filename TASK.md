@@ -18,9 +18,11 @@ Compilar y ejecutar el gateway TCP en ensamblador S/370 dentro de Hercules TK5, 
 - Fuente KICKS leido: el dispatch correcto es `KIKPCP(csa, kikpcpLINK, pgm, commarea, &len)` tras inicializacion estilo `KIKSIP1$`; no es 3270/JES.
 - Verificado KGCC/KICKS: `jcl/KICKGW.jcl` compila y linka con `COPY/COMP/ASM/LKED RC=0000`; `PGM=KICKGW` ejecuta `RC=0000`.
 - Verificado KGCC/X'75': `jcl/KICKGWX.jcl` compila y linka con
-  `X75ASM/COPY/COMP/ASM/LKED RC=0000`; `PGM=KICKGWX` escucha en 4321 y
-  responde `00000010 0000001d ...` desde `kickgw()` cuando KICKS todavia no
-  esta inicializado.
+  `X75ASM/COPY/COMP/ASM/LKED RC=0000`; `PGM=KICKGWX` escucha en 4321,
+  inicializa KICKS estilo `KIKSIP1$` y ejecuta `KIKPCP LINK`.
+- Verificado CICS gateway: llamada TCP binaria a `KLASTCCG` en `KIKRPL`
+  devuelve `00000000 00000004 00000000` (`rc=0`, longitud 4, commarea
+  devuelta).
 
 ## Lo que falta
 
@@ -57,10 +59,14 @@ node test/test-gateway.js --host=localhost --port=4321
 3. `prelink -s /jcc/objs cicsgw.obj cicsgw.asm` (resuelve librerias)
 4. Subir el .obj al DASD de TK5 (requiere card reader EBCDIC via rdrprep, o instalar JCC en la imagen Docker)
 
-### 5. Siguiente paso KICKS
-- Integrar en `KICKGWX` la inicializacion de `KIKSIP1$`.
-- Crear TCA/commarea siguiendo `mak_tca()` de `KIKKCP1$`.
-- Invocar programas con `KIKPCP(csa, kikpcpLINK, pgm8, commarea, &len)`.
+### 5. KICKS gateway verificado
+- `KICKGWX` inicializa CSA/TCA/TCTTE/loadcb/SIT/PPT/PCT/FCT/DCT y control
+  programs siguiendo `KIKSIP1$`.
+- Crea TCA/EIB para cada request siguiendo `mak_tca()` de `KIKKCP1$`.
+- Invoca programas con `KIKPCP(csa, kikpcpLINK, pgm8, commarea, &len)`.
+- El RUN necesita `STEPLIB`, `SKIKLOAD` y `KIKRPL` apuntando a las librerias
+  KICKS; en este TK5 se instalaron tambien `KIKASRB`, `KIKLOAD` y `VCONSTB5`
+  en `HERC01.KICKSSYS.V1R5M0.SKIKLOAD`.
 - La ruta de compilacion KGCC ya esta resuelta: `JOBPROC` debe apuntar a
   `HERC01.KICKSSYS.V1R5M0.PROCLIB`, `GCCPREF=SYS1`, `PDPPREF=PDPCLIB`,
   `COMP.INCLUDE` debe usar `HERC01.KICKSTS.H`,

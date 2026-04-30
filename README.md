@@ -129,14 +129,14 @@ KICKGWX COMP   GCC370       RC=0000
 KICKGWX ASM    IFOX00       RC=0000
 KICKGWX LKED   IEWL         RC=0000
 
-Request TESTCOB + zero commarea:
-response hex = 00000010 0000001d ...
-rc=16, output length=29
+Request KLASTCCG + 4-byte commarea:
+response hex = 00000000 00000004 00000000
+rc=0, output length=4
 ```
 
-`rc=16` is the expected current guard from `kickgw()` when KICKS CSA/TCA/PCP
-state has not been initialized yet. The TCP bind/listen/accept/recv/send path
-and the KGCC call into `kickgw()` are verified.
+This verifies the TCP bind/listen/accept/recv/send path, KICKS-style
+CSA/TCA/EIB initialization, and `KIKPCP LINK` dispatch into a real program from
+`KIKRPL`.
 
 ## Configuration
 
@@ -168,9 +168,8 @@ The verified gateway uses the Hercules X'75' TCPIP sequence from inside MVS:
 
 - Max commarea size: 4096 bytes.
 - The current ASM response validates the TCP/protocol path.
-- `KICKGWX` reaches `kickgw()` from TCP, but full KICKS program dispatch still
-  needs `KIKSIP1$`-style initialization and TCA/EIB creation before
-  `KIKPCP LINK`.
+- `KICKGWX` requires `KIKASRB`, `KIKLOAD`, and `VCONSTB5` to exist in
+  `HERC01.KICKSSYS.V1R5M0.SKIKLOAD`, plus RUN DDs for `SKIKLOAD` and `KIKRPL`.
 - The current Docker container publishes 3270/3505/8038 only. Port 4321 is
   reachable inside the container network; publish or proxy it for host access.
 - No TLS/encryption (plaintext TCP)
