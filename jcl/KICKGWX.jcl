@@ -112,12 +112,30 @@ extern kikaica;
 
 static char reqbuf[MAX_REQ + 12];
 static char rspbuf[MAX_REQ + 12];
+static char gw_userid[8] = "KGW4321 ";
+static char gw_trmid[8] = "TCPG4321";
+static char gw_trmid4[4] = "4321";
 static int kicks_ready = 0;
 
 static void tracewtr(char *tracemsg, int intense)
 {
     (void)tracemsg;
     (void)intense;
+}
+
+static void set_gateway_identity(int port)
+{
+    char tmp[16];
+
+    memset(gw_userid, ' ', sizeof(gw_userid));
+    memset(gw_trmid, ' ', sizeof(gw_trmid));
+    memset(gw_trmid4, ' ', sizeof(gw_trmid4));
+    sprintf(tmp, "KGW%04d", port);
+    memcpy(gw_userid, tmp, 7);
+    sprintf(tmp, "TCPG%04d", port);
+    memcpy(gw_trmid, tmp, 8);
+    sprintf(tmp, "%04d", port);
+    memcpy(gw_trmid4, tmp, 4);
 }
 
 static void init_base_csa(KIKCSA *csa)
@@ -170,11 +188,11 @@ static void init_base_csa(KIKCSA *csa)
     memset((char *)&kiktctte, 0, sizeof(kiktctte));
     csa->tctte = &kiktctte;
     memset(csa->tctte->usrid, ' ', 8);
-    memcpy(csa->tctte->usrid, "KICKGWX ", 8);
-    memcpy(csa->tctte->trmid, "TCPGW001", 8);
-    memcpy(csa->tctte->trmid4, "GW01", 4);
+    memcpy(csa->tctte->usrid, gw_userid, 8);
+    memcpy(csa->tctte->trmid, gw_trmid, 8);
+    memcpy(csa->tctte->trmid4, gw_trmid4, 4);
     memset(csa->tctte->sysid, ' ', 8);
-    memcpy(csa->tctte->sysid, "KICKGWX ", 8);
+    memcpy(csa->tctte->sysid, gw_userid, 8);
     csa->tctte->PRMlines = 24;
     csa->tctte->PRMcols = 80;
     csa->tctte->ALTlines = 24;
@@ -534,7 +552,9 @@ int main(int argc, char **argv)
         return 8;
     }
 
-    printf("KICKGWX starting port %d\n", port);
+    set_gateway_identity(port);
+
+    printf("KICKGWX starting port %d trmid %.8s\n", port, gw_trmid);
     fflush(stdout);
 
     rc = x75call(1, 0, 0, 0, 0, 0);

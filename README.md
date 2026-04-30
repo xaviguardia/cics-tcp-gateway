@@ -93,6 +93,16 @@ Build and run the KGCC-hosted TCP gateway:
 awk '{gsub(/\r/,""); print}' jcl/KICKGWX.jcl | nc localhost 3505
 ```
 
+When running TK5 in Docker on this host, Hercules must be started with the CICS
+gateway port published to macOS:
+
+```bash
+docker run -d --privileged --name hercules-mvs --restart unless-stopped \
+  -p 3270:3270 -p 3505:3505 -p 8038:8038 -p 4321:4321 \
+  -v docker_mvs-tk5-dasd.usr:/opt/tk5/dasd.usr \
+  cics-tcp-gateway/hercules-mvs:with-4321-base
+```
+
 Run the host-side acceptor/proxy in front of one or more KICKGWX workers:
 
 ```bash
@@ -103,6 +113,19 @@ node src/host-gateway.js --host=0.0.0.0 --port=4321 \
 Each backend is a full TCP session target. The frontend does not split a user
 session across workers; it selects a worker when the client connects and then
 proxies the byte stream.
+
+Run the Python SSE web console for interactive session loops:
+
+```bash
+python3 src/cics_web_sessions.py --host 127.0.0.1 --port 8088 \
+  --backend 127.0.0.1:4321
+```
+
+Open `http://127.0.0.1:8088/`, choose the number of sessions, program,
+commarea hex, interval, and backend list, then press Start. The browser uses
+Server-Sent Events from `/events`; every UI session owns an independent
+persistent TCP socket to one backend and emits connected/response/error/stopped
+events as the loop runs.
 
 ## Test
 
@@ -164,6 +187,21 @@ client-1
 client-2
 ```
 
+Verified Python SSE console with a protocol-compatible local backend:
+
+```text
+POST /api/start -> {"running":2}
+SSE events -> status, response, response
+```
+
+Verified Python SSE console against real KICKGWX through Docker-published
+`127.0.0.1:4321`:
+
+```text
+POST /api/start -> {"running":2}
+SSE events -> status, status, status, connected, connected, response, response
+```
+
 ## Configuration
 
 The ASM listener uses port 4321 in the BIND parameter:
@@ -219,6 +257,7 @@ jcl/KICKGW.jcl        KGCC/KICKS compile/link JCL for KICKGW
 jcl/KICKGWX.jcl       KGCC-hosted gateway build/run JCL
 test/test-gateway.js  Node.js test client with EBCDIC translation
 src/host-gateway.js   Host-side protocol harness
+src/cics_web_sessions.py Python SSE web console for session loops
 ```
 
 ## License

@@ -30,6 +30,17 @@ Compilar y ejecutar el gateway TCP en ensamblador S/370 dentro de Hercules TK5, 
   acepta clientes concurrentes y asigna cada sesion completa a un backend
   `KICKGWX` (`--backend=host:port`). Probado con 3 clientes concurrentes contra
   un backend local.
+- `src/cics_web_sessions.py` sirve una pagina web simple con SSE (`/events`):
+  lanza N sesiones independientes, cada una con socket persistente propio a
+  CICS/KICKGWX, y publica respuestas en bucle. Probado con backend local
+  compatible: `POST /api/start -> {"running":2}` y SSE recibe
+  `status,response,response`.
+- Docker recreado con puerto CICS publicado: `--privileged -p 4321:4321`.
+  Verificado desde macOS contra `127.0.0.1:4321` con dos frames `KLASTCCG` y
+  respuesta `000000000000000400000000000000000000000400000000`.
+- Web Python local arrancada en `http://127.0.0.1:8088/` contra backend real
+  `127.0.0.1:4321`. Verificado SSE real:
+  `status,status,status,connected,connected,response,response`.
 - `KICKGWX` acepta puerto decimal por `PARM`/primer argumento; el JCL verificado
   usa `PARM='4321'`.
 
@@ -94,6 +105,7 @@ src/CICSGW.asm          ASM con X'75' directo (el que hay que probar)
 src/KICKGW.c            KGCC/KICKS dispatch via KIKPCP LINK
 src/KICKGWX.c           Gateway TCP X'75' entrando por runtime KGCC
 src/X75CALL.asm         Wrapper callable desde KGCC para instruccion X'75'
+src/cics_web_sessions.py Web Python con SSE y N sesiones persistentes
 src/cicsgw.c            Version C (alternativa, requiere JCC)
 src/cicsgw_scan.asm     ASM generado por JCC+asmscan (alternativa)
 jcl/ASMCLG.jcl          JCL para ensamblar+linkear+ejecutar
