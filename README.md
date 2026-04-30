@@ -27,6 +27,13 @@ KIKPCP1$ LINK loads a program and calls it with EIB + commarea
 CICSGW will keep the X'75' accept loop and dispatch requests via KIKPCP LINK
 ```
 
+The KGCC/KICKS build path is now verified on TK5 as well. `jcl/KICKGW.jcl`
+uses the installed KICKS `KGCC` PROC through `JOBPROC`, the restored
+`HERC01.KICKSTS.H` and `HERC01.KICKSTS.TH` include PDSes, and the same
+link-edit convention KICKS uses for C programs (`LOPTS='XREF,MAP'`,
+`ENTRY @@CRT0`). The gateway-side KICKS dispatch module compiles, assembles,
+links, and runs as `PGM=KICKGW`.
+
 ## Protocol
 
 Fixed-format binary over TCP. All strings in EBCDIC.
@@ -62,6 +69,12 @@ awk '{gsub(/\r/,""); print}' jcl/ASMCLG.jcl | nc localhost 3505
 docker exec hercules-mvs cat /opt/tk5/prt/prt00e.txt | tail -50
 ```
 
+Build the KGCC/KICKS dispatch module:
+
+```bash
+awk '{gsub(/\r/,""); print}' jcl/KICKGW.jcl | nc localhost 3505
+```
+
 ## Test
 
 ```bash
@@ -80,6 +93,16 @@ CICSGW05I LISTENING
 Request TESTCOB + zero commarea:
 response hex = 00000000 0000001d ...
 rc=0, output length=29
+```
+
+Verified KGCC/KICKS dispatch build:
+
+```text
+KICKGW COPY GCC input     RC=0000
+KICKGW COMP GCC370        RC=0000
+KICKGW ASM  IFOX00        RC=0000
+KICKGW LKED IEWL          RC=0000
+RUNKICKG PGM=KICKGW       RC=0000
 ```
 
 ## Configuration
@@ -121,7 +144,9 @@ The verified gateway uses the Hercules X'75' TCPIP sequence from inside MVS:
 
 ```
 src/CICSGW.asm        S/370 assembler X'75' listener
+src/KICKGW.c          KGCC/KICKS dispatch side using KIKPCP LINK
 jcl/ASMCLG.jcl        Assemble, link-edit, and run JCL
+jcl/KICKGW.jcl        KGCC/KICKS compile/link JCL for KICKGW
 test/test-gateway.js  Node.js test client with EBCDIC translation
 src/host-gateway.js   Host-side protocol harness
 ```
