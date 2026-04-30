@@ -10,10 +10,17 @@ Compilar y ejecutar el gateway TCP en ensamblador S/370 dentro de Hercules TK5, 
 - Source C alternativo en `src/cicsgw.c` (requiere JCC, no instalado en TK5)
 - Source KGCC/KICKS en `src/KICKGW.c` usa la convencion real de KICKS:
   `KIKPCP(csa, kikpcpLINK, pgm, commarea, &len)`
+- Source KGCC-hosted TCP gateway en `src/KICKGWX.c` usa la misma convencion
+  X'75' de `src/CICSGW.asm` para bind/listen/accept/recv/send, entrando por
+  runtime KGCC y llamando a `kickgw()`.
 - Verificado en MVS: `IFOX00 RC=0000`, `IEWL RC=0000`, `BIND OK PORT 4321`, `LISTENING`
 - Verificado con cliente binario desde el contenedor: respuesta `rc=0`, longitud `29`
 - Fuente KICKS leido: el dispatch correcto es `KIKPCP(csa, kikpcpLINK, pgm, commarea, &len)` tras inicializacion estilo `KIKSIP1$`; no es 3270/JES.
 - Verificado KGCC/KICKS: `jcl/KICKGW.jcl` compila y linka con `COPY/COMP/ASM/LKED RC=0000`; `PGM=KICKGW` ejecuta `RC=0000`.
+- Verificado KGCC/X'75': `jcl/KICKGWX.jcl` compila y linka con
+  `X75ASM/COPY/COMP/ASM/LKED RC=0000`; `PGM=KICKGWX` escucha en 4321 y
+  responde `00000010 0000001d ...` desde `kickgw()` cuando KICKS todavia no
+  esta inicializado.
 
 ## Lo que falta
 
@@ -51,7 +58,7 @@ node test/test-gateway.js --host=localhost --port=4321
 4. Subir el .obj al DASD de TK5 (requiere card reader EBCDIC via rdrprep, o instalar JCC en la imagen Docker)
 
 ### 5. Siguiente paso KICKS
-- Integrar el accept loop X'75' con la inicializacion de `KIKSIP1$`.
+- Integrar en `KICKGWX` la inicializacion de `KIKSIP1$`.
 - Crear TCA/commarea siguiendo `mak_tca()` de `KIKKCP1$`.
 - Invocar programas con `KIKPCP(csa, kikpcpLINK, pgm8, commarea, &len)`.
 - La ruta de compilacion KGCC ya esta resuelta: `JOBPROC` debe apuntar a
@@ -65,10 +72,13 @@ node test/test-gateway.js --host=localhost --port=4321
 ```
 src/CICSGW.asm          ASM con X'75' directo (el que hay que probar)
 src/KICKGW.c            KGCC/KICKS dispatch via KIKPCP LINK
+src/KICKGWX.c           Gateway TCP X'75' entrando por runtime KGCC
+src/X75CALL.asm         Wrapper callable desde KGCC para instruccion X'75'
 src/cicsgw.c            Version C (alternativa, requiere JCC)
 src/cicsgw_scan.asm     ASM generado por JCC+asmscan (alternativa)
 jcl/ASMCLG.jcl          JCL para ensamblar+linkear+ejecutar
 jcl/KICKGW.jcl          JCL KGCC probado para compilar/linkar KICKGW
+jcl/KICKGWX.jcl         JCL KGCC+X'75' probado para ejecutar KICKGWX
 test/test-gateway.js    Test client Node.js
 README.md               Documentacion (actualizar con resultados)
 ```

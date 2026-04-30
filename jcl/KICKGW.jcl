@@ -22,7 +22,7 @@
 
 #define KICKGW_MAX_COMMAREA 24576
 
-static int kickgw_link(char *program, char *commarea, int commarea_len)
+int kickgw(char *program, char *commarea, int commarea_len)
 {
     KIKCSA *csa = &kikcsa;
     int len = commarea_len;
@@ -32,6 +32,15 @@ static int kickgw_link(char *program, char *commarea, int commarea_len)
     }
     if (len > KICKGW_MAX_COMMAREA) {
         return 12;
+    }
+    if (csa->pcp_addr == 0) {
+        return 16;
+    }
+    if (csa->tca == 0) {
+        return 16;
+    }
+    if (csa->tctte == 0) {
+        return 16;
     }
 
     /*
@@ -58,7 +67,7 @@ int main(int argc, char **argv)
      * reference here forces KGCC to validate the KIKPCP LINK call signature.
      */
     if (argc > 1000) {
-        return kickgw_link(program, commarea, sizeof(commarea));
+        return kickgw(program, commarea, sizeof(commarea));
     }
 
     printf("KICKGW KGCC/KICKS dispatch module loaded\n");

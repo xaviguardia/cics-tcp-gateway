@@ -10,12 +10,16 @@ the protocol below.
 
 ## Architecture
 
-Verified guest-side path:
+Verified guest-side paths:
 
 ```text
 TCP Client  --TCP-->  CICSGW ASM via X'75'  --next-->  KICKS Program
   request              MVS address space                 KIKPCP LINK
   response
+
+TCP Client  --TCP-->  KICKGWX KGCC via X75CALL  -->  kickgw()
+  request              MVS address space              KIKPCP LINK once
+  response                                          KICKS state is ready
 ```
 
 KICKS dispatch target, from the KICKS source:
@@ -33,6 +37,11 @@ uses the installed KICKS `KGCC` PROC through `JOBPROC`, the restored
 link-edit convention KICKS uses for C programs (`LOPTS='XREF,MAP'`,
 `ENTRY @@CRT0`). The gateway-side KICKS dispatch module compiles, assembles,
 links, and runs as `PGM=KICKGW`.
+
+`jcl/KICKGWX.jcl` verifies the combined KGCC-hosted TCP gateway. It assembles
+`src/X75CALL.asm`, compiles `src/KICKGWX.c`, links both into `KICKGWX`, binds
+`0.0.0.0:4321`, accepts a binary request, and returns a gateway response from
+the `kickgw()` dispatch guard.
 
 ## Protocol
 
@@ -75,6 +84,12 @@ Build the KGCC/KICKS dispatch module:
 awk '{gsub(/\r/,""); print}' jcl/KICKGW.jcl | nc localhost 3505
 ```
 
+Build and run the KGCC-hosted TCP gateway:
+
+```bash
+awk '{gsub(/\r/,""); print}' jcl/KICKGWX.jcl | nc localhost 3505
+```
+
 ## Test
 
 ```bash
@@ -105,6 +120,24 @@ KICKGW LKED IEWL          RC=0000
 RUNKICKG PGM=KICKGW       RC=0000
 ```
 
+Verified KGCC-hosted TCP gateway:
+
+```text
+KICKGWX X75ASM IFOX00       RC=0000
+KICKGWX COPY   IEBGENER     RC=0000
+KICKGWX COMP   GCC370       RC=0000
+KICKGWX ASM    IFOX00       RC=0000
+KICKGWX LKED   IEWL         RC=0000
+
+Request TESTCOB + zero commarea:
+response hex = 00000010 0000001d ...
+rc=16, output length=29
+```
+
+`rc=16` is the expected current guard from `kickgw()` when KICKS CSA/TCA/PCP
+state has not been initialized yet. The TCP bind/listen/accept/recv/send path
+and the KGCC call into `kickgw()` are verified.
+
 ## Configuration
 
 The ASM listener uses port 4321 in the BIND parameter:
@@ -134,8 +167,10 @@ The verified gateway uses the Hercules X'75' TCPIP sequence from inside MVS:
 ## Limitations
 
 - Max commarea size: 4096 bytes.
-- The current ASM response validates the TCP/protocol path; KICKS program
-  dispatch is not wired yet.
+- The current ASM response validates the TCP/protocol path.
+- `KICKGWX` reaches `kickgw()` from TCP, but full KICKS program dispatch still
+  needs `KIKSIP1$`-style initialization and TCA/EIB creation before
+  `KIKPCP LINK`.
 - The current Docker container publishes 3270/3505/8038 only. Port 4321 is
   reachable inside the container network; publish or proxy it for host access.
 - No TLS/encryption (plaintext TCP)
@@ -145,8 +180,11 @@ The verified gateway uses the Hercules X'75' TCPIP sequence from inside MVS:
 ```
 src/CICSGW.asm        S/370 assembler X'75' listener
 src/KICKGW.c          KGCC/KICKS dispatch side using KIKPCP LINK
+src/KICKGWX.c         KGCC-hosted X'75' gateway loop
+src/X75CALL.asm       KGCC-callable X'75' wrapper
 jcl/ASMCLG.jcl        Assemble, link-edit, and run JCL
 jcl/KICKGW.jcl        KGCC/KICKS compile/link JCL for KICKGW
+jcl/KICKGWX.jcl       KGCC-hosted gateway build/run JCL
 test/test-gateway.js  Node.js test client with EBCDIC translation
 src/host-gateway.js   Host-side protocol harness
 ```
