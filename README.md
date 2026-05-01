@@ -391,14 +391,13 @@ node test/test-gateway.js --host=localhost --port=4321
 | `src/KICKGWX.c` | ~700 | The main gateway. Non-blocking event loop multiplexing 8 sessions. Full KICKS initialization (CSA/TCA/EIB/SIT/PPT/PCT/FCT/DCT + 7 control programs). Per-session state machine (RDHDR→RDDATA→dispatch→repeat). Built-in GWDEMO handler. Constrained by KGCC: no `typedef struct`, no `\|\|`, no UTF-8. |
 | `src/KICKGW.c` | ~60 | KICKS dispatch guard. Validates commarea length (0–24576), checks CSA/TCA/TCTTE initialization, calls `KIKPCP LINK`. |
 | `src/X75CALL.asm` | ~98 | Two functions: `x75call()` wraps the X'75' two-phase conversation for C code. `stimwt()` wraps MVS `STIMER WAIT` (SVC 47) for CPU-friendly idle loops. |
-| `src/cicsgw.c` | ~200 | Alternative C implementation using JCC socket wrappers. Requires JCC compiler (not installed in standard TK5). |
+| `src/cicsgw.c` | — | *Removed.* Alternative C implementation using JCC socket wrappers (available in git history). |
 
-### Host side (Python + Node.js)
+### Host side (Python)
 
 | File | Lines | Description |
 |------|-------|-------------|
 | `src/cics_web_sessions.py` | ~810 | Python web server (pure stdlib). ThreadingHTTPServer with SSE. Each session runs in a dedicated thread with its own persistent TCP socket. EventBroker pub/sub for SSE delivery. Environmental Monitoring UI with SVG gauges, canvas sparklines, and operator console. Decodes EBCDIC (cp037) to ASCII. |
-| `src/host-gateway.js` | ~220 | Node.js TCP proxy. Mock mode (echo) or proxy mode (round-robin across KICKGWX backend workers). Enables multi-user operation with isolated KICKS state per worker. |
 
 ### JCL
 
@@ -518,7 +517,7 @@ KICKS stores global state in the CSA (Common Storage Area). Two concurrent
 `KIKPCP LINK` calls would corrupt each other. The gateway serializes
 dispatch: socket I/O is multiplexed across all 8 sessions, but program
 execution happens one request at a time. For true multi-user parallelism,
-run multiple KICKGWX processes behind `host-gateway.js` in proxy mode.
+run multiple KICKGWX processes behind a TCP proxy (see `host-gateway.js` in git history).
 
 ### Docker `--privileged` requirement
 
@@ -535,7 +534,7 @@ container starts but X'75' instructions fail with operation exceptions
 - No TLS (plaintext TCP). The X'75' instruction does not support SSL
 - Requires `--privileged` Docker for Hercules CPU emulation
 - Single address space — for true multi-user, run multiple KICKGWX workers
-  behind `host-gateway.js` in proxy mode
+  behind a TCP proxy (see `host-gateway.js` in git history)
 
 ## License
 
