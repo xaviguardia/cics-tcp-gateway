@@ -158,7 +158,7 @@ HTML = r"""<!doctype html>
         </label>
       </div>
       <label>Program
-        <input name="program" value="KLASTCCG" maxlength="8">
+        <input name="program" value="GWDEMO" maxlength="8">
       </label>
       <label>Commarea hex
         <textarea name="commareaHex" spellcheck="false">00000000</textarea>

@@ -155,6 +155,8 @@ struct gwsess {
     int state;
     int got;
     int comalen;
+    int seq;
+    int sid;
     char hdr[HDR_LEN];
     char req[MAX_REQ];
 };
@@ -501,6 +503,26 @@ int kickgw(char *program, char *commarea, int commarea_len)
     return 0;
 }
 
+/* --- built-in demo handler ---------------------------------------- */
+
+static int is_demo(char *hdr)
+{
+    return memcmp(hdr, "GWDEMO  ", 8) == 0;
+}
+
+static int handle_demo(struct gwsess *s)
+{
+    int len;
+
+    s->seq++;
+    memset(s->req, 0, 80);
+    sprintf(s->req, "MVS 3.8 SESSION %d  REQ #%04d", s->sid, s->seq);
+
+    len = strlen(s->req);
+    s->comalen = len;
+    return 0;
+}
+
 /* --- session management ------------------------------------------- */
 
 static void session_close(struct gwsess *s)
@@ -524,6 +546,8 @@ static int session_add(int fd)
             sessions[i].fd = fd;
             sessions[i].state = SS_RDHDR;
             sessions[i].got = 0;
+            sessions[i].seq = 0;
+            sessions[i].sid = i;
             if (i >= nsessions) {
                 nsessions = i + 1;
             }
@@ -646,8 +670,12 @@ static int session_poll(struct gwsess *s)
             }
         }
 
-        /* complete frame -- dispatch through KICKS */
-        rc = kickgw(s->hdr, s->req, s->comalen);
+        /* complete frame -- dispatch */
+        if (is_demo(s->hdr)) {
+            rc = handle_demo(s);
+        } else {
+            rc = kickgw(s->hdr, s->req, s->comalen);
+        }
         x75call(10, s->fd, 0, rspbuf,
                 put_response(rc, s->req, s->comalen), 1);
         printf("KICKGWX sess %d rc %d bytes %d\n",
