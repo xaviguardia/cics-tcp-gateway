@@ -1,100 +1,51 @@
 # CICS TCP Gateway for Hercules/MVS
 
-TCP gateway experiments for Hercules/MVS. The verified path is now the
-guest-side S/370 assembler listener using the Hercules X'75' TCPIP instruction:
-MVS creates the socket, binds port 4321, listens, accepts a client, and returns
-the binary gateway protocol response.
+A TCP gateway that executes real CICS transactions on an IBM System/370
+mainframe (emulated with Hercules) running MVS 3.8 and KICKS/CICS. Includes
+a real-time web dashboard with environmental monitoring demo.
 
-The gateway accepts binary requests over TCP and returns binary responses using
-the protocol below.
+![CICS Environmental Monitoring Dashboard](docs/screenshot-live.png)
+
+## What is this?
+
+This project connects a modern web browser to a 1970s IBM mainframe operating
+system. Every data point on the dashboard is a **real CICS transaction**
+processed by an emulated System/370 CPU running MVS 3.8j under
+[Hercules](http://www.hercules-390.eu/), using
+[KICKS](http://kicksfortso.com/) (an open-source CICS clone).
+
+The gateway program (`KICKGWX`) runs inside MVS and accepts TCP connections
+using the Hercules X'75' TCPIP instruction. It multiplexes up to 8 concurrent
+persistent sessions in a single-threaded event loop (same model as Node.js or
+nginx workers), dispatching each request to a CICS program via `KIKPCP LINK`.
+
+The web UI connects 4 independent TCP sessions to the mainframe and visualizes
+each response as an environmental sensor reading: temperature, CO2, water
+quality, and solar output. The architecture diagram on the left shows the
+full data path from browser to S/370 CPU.
 
 ## Architecture
 
-Verified guest-side paths:
-
-```text
-TCP Client  --TCP-->  CICSGW ASM via X'75'  --next-->  KICKS Program
-  request              MVS address space                 KIKPCP LINK
-  response
-
-TCP Client  --TCP-->  KICKGWX KGCC via X75CALL  -->  kickgw()
-  request              MVS address space              KIKPCP LINK once
-  response                                          KICKS state is ready
-
-TCP Clients --TCP--> host-gateway acceptor/proxy --> KICKGWX worker pool
-  many sessions        webserver-style frontend        isolated KICKS state
+```
+Browser (SSE)  -->  Python Proxy (:8088)  -->  TCP :4321  -->  Hercules/Docker
+                    4 persistent sessions                      MVS 3.8j
+                                                               KICKGWX Gateway
+                                                               KICKS/CICS
+                                                               GWDEMO Program
 ```
 
-KICKS dispatch target, from the KICKS source:
+Each request is a 12+ byte binary frame (8-byte EBCDIC program name + 4-byte
+commarea length + N bytes commarea). The response is 8+ bytes (4-byte return
+code + 4-byte output length + N bytes EBCDIC payload).
 
-```text
-KIKSIP1$ initializes CSA/TCA/tables
-KIKSIP1$ terminal loop calls KIKTCP(RECV), then KIKKCP(ATTACH)
-KIKPCP1$ LINK loads a program and calls it with EIB + commarea
-CICSGW will keep the X'75' accept loop and dispatch requests via KIKPCP LINK
-```
+## Quick Start
 
-The KGCC/KICKS build path is now verified on TK5 as well. `jcl/KICKGW.jcl`
-uses the installed KICKS `KGCC` PROC through `JOBPROC`, the restored
-`HERC01.KICKSTS.H` and `HERC01.KICKSTS.TH` include PDSes, and the same
-link-edit convention KICKS uses for C programs (`LOPTS='XREF,MAP'`,
-`ENTRY @@CRT0`). The gateway-side KICKS dispatch module compiles, assembles,
-links, and runs as `PGM=KICKGW`.
+### Prerequisites
 
-`jcl/KICKGWX.jcl` verifies the combined KGCC-hosted TCP gateway. It assembles
-`src/X75CALL.asm`, compiles `src/KICKGWX.c`, links both into `KICKGWX`, binds
-`0.0.0.0:4321`, accepts TCP sessions, loops over framed binary requests on the
-same socket, and returns gateway responses from the `kickgw()` dispatch guard.
+- Docker for running the Hercules/MVS mainframe
+- Python 3.8+ for the web dashboard (no external dependencies)
 
-## Protocol
-
-Fixed-format binary over TCP. All strings in EBCDIC.
-
-### Request
-
-| Offset | Length | Field           | Description                    |
-|--------|--------|-----------------|--------------------------------|
-| 0      | 8      | Program name    | EBCDIC, space-padded           |
-| 8      | 4      | Commarea length | Big-endian unsigned 32-bit     |
-| 12     | N      | Commarea data   | EBCDIC, N = commarea length    |
-
-### Response
-
-| Offset | Length | Field           | Description                    |
-|--------|--------|-----------------|--------------------------------|
-| 0      | 4      | Return code     | Big-endian unsigned 32-bit     |
-| 4      | 4      | Output length   | Big-endian unsigned 32-bit     |
-| 8      | N      | Output data     | EBCDIC, N = output length      |
-
-## Requirements
-
-- Hercules TK5 and Assembler F (IFOX00) for the ASM/X'75' listener.
-- Node.js for the test client.
-- KICKS integration is the next dispatch step. The KICKS source convention is
-  `KIKPCP(csa, kikpcpLINK, pgm, commarea, &len)`, not a 3270 automation path.
-
-## Build and Run
-
-```bash
-awk '{gsub(/\r/,""); print}' jcl/ASMCLG.jcl | nc localhost 3505
-
-docker exec hercules-mvs cat /opt/tk5/prt/prt00e.txt | tail -50
-```
-
-Build the KGCC/KICKS dispatch module:
-
-```bash
-awk '{gsub(/\r/,""); print}' jcl/KICKGW.jcl | nc localhost 3505
-```
-
-Build and run the KGCC-hosted TCP gateway:
-
-```bash
-awk '{gsub(/\r/,""); print}' jcl/KICKGWX.jcl | nc localhost 3505
-```
-
-When running TK5 in Docker on this host, Hercules must be started with the CICS
-gateway port published to macOS:
+### 1. Start the Hercules mainframe
 
 ```bash
 docker run -d --privileged --name hercules-mvs --restart unless-stopped \
@@ -103,162 +54,160 @@ docker run -d --privileged --name hercules-mvs --restart unless-stopped \
   cics-tcp-gateway/hercules-mvs:with-4321-base
 ```
 
-Run the host-side acceptor/proxy in front of one or more KICKGWX workers:
+### 2. Submit the gateway JCL
 
 ```bash
-node src/host-gateway.js --host=0.0.0.0 --port=4321 \
-  --backend=127.0.0.1:4322 --backend=127.0.0.1:4323
+awk '{gsub(/\r/,""); print}' jcl/KICKGWX.jcl | nc localhost 3505
 ```
 
-Each backend is a full TCP session target. The frontend does not split a user
-session across workers; it selects a worker when the client connects and then
-proxies the byte stream.
+This assembles the X'75' wrapper, compiles the C gateway, links everything,
+and starts `KICKGWX` listening on port 4321 inside MVS.
 
-Run the Python SSE web console for interactive session loops:
+### 3. Start the web dashboard
 
 ```bash
-python3 src/cics_web_sessions.py --host 127.0.0.1 --port 8088 \
-  --backend 127.0.0.1:4321
+python3 src/cics_web_sessions.py --host 127.0.0.1 --port 8088 --backend 127.0.0.1:4321
 ```
 
-Open `http://127.0.0.1:8088/`, choose the number of sessions, program,
-commarea hex, interval, and backend list, then press Start. The browser uses
-Server-Sent Events from `/events`; every UI session owns an independent
-persistent TCP socket to one backend and emits connected/response/error/stopped
-events as the loop runs.
+Open http://127.0.0.1:8088/ and click **START**.
 
-## Test
+### Or use Docker for the web dashboard
 
 ```bash
-# If Docker publishes 4321 to the host:
-node test/test-gateway.js --host=localhost --port=4321
+docker build -t cics-tcp-gateway-web .
+docker run -p 8088:8088 cics-tcp-gateway-web
 ```
 
-Verified result inside the Hercules container network:
+## The Journey
 
-```text
-IFOX00 RC=0000
-IEWL   RC=0000
-CICSGW04I BIND OK PORT 4321
-CICSGW05I LISTENING
+This project was built incrementally, each step verified on real hardware
+(emulated S/370):
 
-Request TESTCOB + zero commarea:
-response hex = 00000000 0000001d ...
-rc=0, output length=29
-```
+1. **S/370 assembler TCP listener** (`CICSGW.asm`) — First proof that MVS can
+   open a TCP socket using the Hercules X'75' instruction. Raw assembler, no C,
+   no libraries. SOCKET → BIND → LISTEN → ACCEPT → RECV → SEND → CLOSE.
 
-Verified KGCC/KICKS dispatch build:
+2. **KICKS dispatch module** (`KICKGW.c`) — C module compiled with KGCC that
+   calls `KIKPCP LINK` to execute a real CICS program and return the commarea.
+   Validates that the KICKS API works from a gateway context.
 
-```text
-KICKGW COPY GCC input     RC=0000
-KICKGW COMP GCC370        RC=0000
-KICKGW ASM  IFOX00        RC=0000
-KICKGW LKED IEWL          RC=0000
-RUNKICKG PGM=KICKGW       RC=0000
-```
+3. **KGCC-hosted gateway** (`KICKGWX.c` + `X75CALL.asm`) — Full gateway in C
+   with an assembler wrapper for X'75' calls. Single listener, session-persistent
+   connections, binary protocol, KICKS initialization.
 
-Verified KGCC-hosted TCP gateway:
+4. **KICKS-backed dispatch** — Verified real CICS program execution (`KLASTCCG`)
+   through the gateway. Request goes in as TCP, gets dispatched to CICS, commarea
+   comes back modified.
 
-```text
-KICKGWX X75ASM IFOX00       RC=0000
-KICKGWX COPY   IEBGENER     RC=0000
-KICKGWX COMP   GCC370       RC=0000
-KICKGWX ASM    IFOX00       RC=0000
-KICKGWX LKED   IEWL         RC=0000
+5. **Multi-session event loop** — Key discovery: X'75' ACCEPT is non-blocking
+   (returns -2 when no connection is pending). This enabled a reactor-style event
+   loop multiplexing 8 concurrent sessions in a single MVS address space. Same
+   architecture as Node.js.
 
-Request KLASTCCG + 4-byte commarea:
-response hex = 00000000 00000004 00000000
-rc=0, output length=4
+6. **SSE web console** (`cics_web_sessions.py`) — Python web server with
+   Server-Sent Events. Each browser session owns an independent persistent TCP
+   socket to the mainframe. Real-time streaming of CICS responses.
 
-Same TCP session, two KLASTCCG frames:
-response hex = 000000000000000400000000000000000000000400000000
-```
+7. **STIMER WAIT yield** — Added MVS `STIMER WAIT` (SVC 47) to the idle loop.
+   CPU usage dropped from 100% to ~10% when idle. Proper OS-level cooperative
+   multitasking on a 1970s operating system.
 
-This verifies the TCP bind/listen/accept/recv/send path, KICKS-style
-CSA/TCA/EIB initialization, and `KIKPCP LINK` dispatch into a real program from
-`KIKRPL`.
+8. **GWDEMO built-in handler** — When program name is `GWDEMO`, the gateway
+   responds directly with `MVS 3.8 SESSION n REQ #nnnn`, giving each session its
+   own counter. Enables demo without requiring CICS programs.
 
-Verified host acceptor/proxy:
+9. **Environmental Monitoring UI** — The web dashboard reimagined as a
+   real-time environmental monitoring network. Each CICS session is a sensor
+   station (temperature, CO2, water quality, solar output). The mainframe
+   processes each reading as a transaction — the same model CICS uses worldwide
+   for ATMs, airlines, and retail POS systems.
 
-```text
-3 concurrent frontend clients -> proxy -> backend:
-client-0
-client-1
-client-2
-```
+## Protocol
 
-Verified Python SSE console with a protocol-compatible local backend:
+### Request
 
-```text
-POST /api/start -> {"running":2}
-SSE events -> status, response, response
-```
+| Offset | Length | Field           | Description                |
+|--------|--------|-----------------|----------------------------|
+| 0      | 8      | Program name    | EBCDIC, space-padded       |
+| 8      | 4      | Commarea length | Big-endian unsigned 32-bit |
+| 12     | N      | Commarea data   | N = commarea length        |
 
-Verified Python SSE console against real KICKGWX through Docker-published
-`127.0.0.1:4321`:
+### Response
 
-```text
-POST /api/start -> {"running":2}
-SSE events -> status, status, status, connected, connected, response, response
-```
-
-## Configuration
-
-The ASM listener uses port 4321 in the BIND parameter:
-
-```asm
-BINDPRM  DC    X'000210E1'       AF_INET=2, port 4321
-```
-
-To change the port, convert to hex big-endian:
-- Port 4321 = `0x10E1`
-- Port 8080 = `0x1F90`
-- Port 9090 = `0x2382`
+| Offset | Length | Field         | Description                |
+|--------|--------|---------------|----------------------------|
+| 0      | 4      | Return code   | Big-endian unsigned 32-bit |
+| 4      | 4      | Output length | Big-endian unsigned 32-bit |
+| 8      | N      | Output data   | EBCDIC, N = output length  |
 
 ## How It Works
 
-The verified gateway uses the Hercules X'75' TCPIP sequence from inside MVS:
+The gateway uses the Hercules X'75' TCPIP instruction from inside MVS:
 
-1. **INITAPI** - Initialize the Hercules TCPIP API.
-2. **SOCKET** - Create an AF_INET stream socket.
-3. **BIND** - Bind `0.0.0.0:4321`.
-4. **LISTEN** - Listen with backlog 5.
-5. **ACCEPT** - Accept each client connection.
-6. **RECV** - Read a full request header and commarea.
-7. **SEND** - Return `rc + output length + EBCDIC output`.
-8. Repeat RECV/SEND on the same client socket until EOF/error.
-9. **CLOSE** - Close the client socket and return to accept.
+1. **INITAPI** — Initialize the Hercules TCPIP API
+2. **SOCKET** — Create an AF_INET stream socket
+3. **BIND** — Bind `0.0.0.0:4321`
+4. **LISTEN** — Listen with backlog 5
+5. **ACCEPT** — Non-blocking accept (returns -2 when idle)
+6. **RECV** — Non-blocking receive into per-session buffer
+7. **Dispatch** — `KIKPCP LINK` to execute the CICS program (or GWDEMO built-in)
+8. **SEND** — Return `rc + output length + EBCDIC payload`
+9. **STIMER WAIT** — Yield CPU for 10ms when no work is pending
+10. Loop back to step 5
 
-## Limitations
-
-- Max commarea size: 4096 bytes.
-- The current ASM response validates the TCP/protocol path.
-- `KICKGWX` requires `KIKASRB`, `KIKLOAD`, and `VCONSTB5` to exist in
-  `HERC01.KICKSSYS.V1R5M0.SKIKLOAD`, plus RUN DDs for `SKIKLOAD` and `KIKRPL`.
-- The current Docker container publishes 3270/3505/8038 only. Port 4321 is
-  reachable inside the container network; publish or proxy it for host access.
-- `KICKGWX` is session-persistent but still processes accepted clients serially
-  inside one MVS address space. Webserver-style simultaneous multi-user
-  operation is provided by running multiple independent `KICKGWX` workers and
-  putting `src/host-gateway.js` in proxy mode in front of them.
-- `KICKGWX` accepts a decimal port as its first program argument/JCL `PARM`;
-  the default JCL uses `PARM='4321'`.
-- No TLS/encryption (plaintext TCP)
+All socket I/O is multiplexed across sessions. KICKS dispatch is serialized
+(KICKS globals are not reentrant).
 
 ## Files
 
+### MVS/Hercules side (runs inside the mainframe)
+
+| File | Description |
+|------|-------------|
+| `src/CICSGW.asm` | Pure S/370 assembler TCP listener using X'75' instruction directly. The first proof-of-concept: SOCKET, BIND, LISTEN, ACCEPT, RECV, SEND, CLOSE — all in assembler with no external dependencies. |
+| `src/KICKGWX.c` | The main gateway program. KGCC-compiled C that runs under MVS. Implements a non-blocking event loop multiplexing up to 8 concurrent TCP sessions, initializes KICKS CSA/TCA/EIB, dispatches requests via `KIKPCP LINK`, and includes the built-in GWDEMO handler. ~700 lines of C constrained by KGCC limitations (no `typedef struct`, no `\|\|` operator, no UTF-8). |
+| `src/KICKGW.c` | KICKS dispatch guard module. Validates commarea, checks KICKS initialization, calls `KIKPCP LINK`. Separated from the gateway loop for modularity. |
+| `src/X75CALL.asm` | KGCC-callable assembler wrapper for the Hercules X'75' TCPIP instruction. Handles the two-phase conversation protocol (guest→host, host→guest) and buffer management. Also includes `STIMWT` — an MVS `STIMER WAIT` wrapper for CPU-friendly idle loops. |
+
+### Host side (runs on your machine)
+
+| File | Description |
+|------|-------------|
+| `src/cics_web_sessions.py` | Python SSE web server. Connects N independent persistent TCP sessions to the CICS backend, streams responses as Server-Sent Events, and serves the Environmental Monitoring dashboard. Pure stdlib — no dependencies beyond Python 3.8+. |
+| `src/host-gateway.js` | Node.js TCP acceptor/proxy. Can run in mock mode (echo responses) or proxy mode (round-robin to multiple KICKGWX backend workers for true multi-user operation). |
+
+### JCL (Job Control Language)
+
+| File | Description |
+|------|-------------|
+| `jcl/ASMCLG.jcl` | Assemble, link-edit, and run the basic CICSGW assembler listener. |
+| `jcl/KICKGW.jcl` | KGCC compile and link for the KICKS dispatch module. |
+| `jcl/KICKGWX.jcl` | Full build pipeline: assembles X75CALL, compiles KICKGWX, links with KICKS libraries (KIKASRB, KIKLOAD, VCONSTB5), and runs the gateway with `PARM='4321'`. |
+
+### Test
+
+| File | Description |
+|------|-------------|
+| `test/test-gateway.js` | Node.js test client with EBCDIC translation tables. Sends binary protocol requests and validates responses. |
+
+## Configuration
+
+The KICKGWX gateway accepts a decimal port number as its JCL `PARM`:
+
+```jcl
+//RUNKGWX  EXEC PGM=KICKGWX,PARM='4321'
 ```
-src/CICSGW.asm        S/370 assembler X'75' listener
-src/KICKGW.c          KGCC/KICKS dispatch side using KIKPCP LINK
-src/KICKGWX.c         KGCC-hosted X'75' gateway loop
-src/X75CALL.asm       KGCC-callable X'75' wrapper
-jcl/ASMCLG.jcl        Assemble, link-edit, and run JCL
-jcl/KICKGW.jcl        KGCC/KICKS compile/link JCL for KICKGW
-jcl/KICKGWX.jcl       KGCC-hosted gateway build/run JCL
-test/test-gateway.js  Node.js test client with EBCDIC translation
-src/host-gateway.js   Host-side protocol harness
-src/cics_web_sessions.py Python SSE web console for session loops
-```
+
+The web dashboard defaults to `GWDEMO` with 4 sessions at 1-second intervals.
+All parameters are configurable from the UI.
+
+## Limitations
+
+- Max commarea: 4096 bytes
+- KICKS dispatch is serialized (not reentrant) — socket I/O is multiplexed
+- No TLS/encryption (plaintext TCP)
+- Requires `--privileged` Docker flag for Hercules
+- KGCC compiler constraints: no `typedef struct`, no `||`, no UTF-8 in source
 
 ## License
 

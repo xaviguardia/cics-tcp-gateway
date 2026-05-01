@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+*.obj
+*.nam
+node_modules/
