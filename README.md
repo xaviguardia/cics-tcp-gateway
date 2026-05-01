@@ -6,7 +6,13 @@ MVS 3.8j and [KICKS](http://kicksfortso.com/) (open-source CICS).
 Includes a real-time web dashboard that visualizes the mainframe processing
 live sensor data.
 
-![CICS Environmental Monitoring Dashboard](docs/screenshot-live.png)
+### Dashboard idle — architecture diagram and 4 sensor stations awaiting data
+
+![Dashboard idle state](docs/screenshot-idle.png)
+
+### Dashboard live — 4 concurrent CICS sessions streaming real transactions
+
+![Dashboard live with data](docs/screenshot-live.png)
 
 Every data point on the dashboard is a **real CICS transaction** processed
 by an emulated System/370 CPU. The gateway accepts concurrent persistent TCP
