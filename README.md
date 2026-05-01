@@ -14,6 +14,111 @@ sessions, dispatches requests to CICS programs via `KIKPCP LINK`, and
 returns EBCDIC responses — the same model that processes 1.2 million
 transactions per second worldwide (ATMs, airlines, retail POS).
 
+## What is CICS and why does it matter?
+
+[CICS](https://www.ibm.com/products/cics-transaction-server) (Customer
+Information Control System) is IBM's transaction processing monitor, first
+released in 1969. It runs the world's highest-volume transactional
+workloads: **92 of the top 100 banks**, most major airlines, insurance
+companies, and retail chains depend on CICS. IBM reports over **1.2 million
+CICS transactions per second** across its installed base — more than any
+other transaction platform.
+
+CICS provides what modern architectures struggle to replicate:
+
+- **Single address space, multiple concurrent transactions** — thousands of
+  programs share memory and dispatch serially or in parallel under one
+  monitor. No network hops between services, no serialization overhead, no
+  distributed tracing needed. A CICS `LINK` to another program is a local
+  function call, not an HTTP request.
+- **ACID guarantees built in** — two-phase commit across VSAM files, DB2,
+  MQ, and IMS in a single unit of work. No eventual consistency, no saga
+  patterns, no compensation logic.
+- **Sub-millisecond latency** — a typical CICS transaction completes in
+  0.1–2ms. The equivalent microservice chain (API gateway → auth service →
+  business logic → database → response aggregation) adds 10–50ms of network
+  and serialization overhead per hop.
+
+### The microservices trade-off
+
+When organizations modernize CICS applications, the standard approach is
+decomposition into microservices. A single CICS transaction that did
+`LINK PGMA → LINK PGMB → LINK PGMC` becomes three HTTP services with
+JSON serialization, service discovery, circuit breakers, retry logic, and
+distributed tracing.
+
+**What you gain**: independent deployment, team autonomy, horizontal
+scaling, technology diversity.
+
+**What you lose**:
+
+| Concern | CICS monolith | Microservices |
+|---------|--------------|---------------|
+| Latency per inter-service call | ~0 (in-process LINK) | 1–10ms (HTTP/gRPC) |
+| Transaction consistency | Built-in 2PC | Sagas, eventual consistency |
+| Observability | SMF records, CICS statistics | Distributed tracing (Jaeger/Zipkin) |
+| Failure modes | Process crash = all or nothing | Partial failure, cascading timeouts |
+| Operational complexity | One region to monitor | N services × M instances |
+| Data coherence | Shared VSAM/DB2 | Database-per-service, sync challenges |
+
+A 5-hop microservice call chain at 3ms per hop adds 15ms of pure network
+latency that simply doesn't exist in CICS. For high-frequency trading,
+real-time payments, or airline reservation systems, this overhead is
+unacceptable — which is why CICS still runs these workloads.
+
+### The observability gap on the host
+
+The biggest operational pain point with mainframe CICS is **lack of modern
+observability**. Distributed systems have mature tooling — OpenTelemetry,
+Prometheus, Grafana, Datadog — that provides traces, metrics, and logs
+with microsecond granularity.
+
+Mainframe CICS has none of this:
+
+- **SMF records** (System Management Facility) are the primary telemetry
+  source. They're batch-oriented, written to sequential datasets, and
+  typically processed hours or days later. No real-time streaming.
+- **CICS statistics** are available via `EXEC CICS COLLECT STATISTICS`, but
+  the data stays on the host. Getting it out requires SNA/LU6.2, MQ, or
+  custom TCP programs — exactly what this project demonstrates.
+- **No OpenTelemetry on z/OS** — the OTel SDK requires a modern runtime
+  (Java 8+, .NET, Python, Go). CICS programs are written in COBOL, PL/I,
+  or assembler. There is no OTel SDK for COBOL. Even for CICS Java programs
+  (JVMServer), the z/OS JVM has limited OTel support and the overhead of
+  tracing in a high-throughput transaction monitor is considered too risky
+  for production workloads.
+- **Vendor agents** (Dynatrace, Datadog, Instana) can instrument CICS
+  TS v5+ on z/OS, but they require IBM-specific APIs (CICS Monitoring
+  Facility, z/OS System Logger), cost significant MIPS, and add latency to
+  every transaction. Most shops refuse to run them in production.
+- **The data stays trapped** — even when telemetry exists, it lives in
+  EBCDIC on DASD. Correlating a CICS transaction with a downstream REST
+  call requires manual effort: match the CICS task number in SMF 110
+  records with the trace ID in Jaeger. No tool does this automatically.
+
+This is the fundamental tension: the platform that processes the most
+critical transactions in the world has the least visibility into what's
+happening inside it.
+
+### What this project demonstrates
+
+This gateway is a proof of concept for **bridging the observability gap**.
+By exposing CICS transactions over TCP with a web dashboard, we get:
+
+- **Real-time streaming** — every transaction is visible the moment it
+  completes, not hours later in an SMF dump
+- **Standard protocols** — SSE/HTTP, not SNA/LU6.2
+- **Correlation potential** — the gateway could inject trace IDs into the
+  commarea, creating a bridge between distributed traces and CICS
+  transaction IDs
+- **Zero MIPS overhead for monitoring** — the gateway runs as a single
+  MVS batch job; the heavy lifting (UI, aggregation, alerting) happens
+  off-host
+
+The environmental monitoring demo is a visual metaphor: each sensor station
+is a CICS session, and the dashboard is the observability layer that
+mainframe teams have always wanted.
+
 ## How we built it
 
 This project was built bottom-up, from raw S/370 assembler to a web
