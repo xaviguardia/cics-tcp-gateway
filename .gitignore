@@ -3,3 +3,4 @@ __pycache__/
 *.obj
 *.nam
 node_modules/
+.claude/
