@@ -302,22 +302,7 @@ Writing C for KGCC (a GCC port to S/370) has unique constraints:
 
 ## Architecture
 
-```
-Browser ──SSE──► Python Proxy (:8088) ──TCP──► Hercules/Docker
-                 4 persistent sessions          │
-                                                ▼
-                                           MVS 3.8j
-                                           IBM System/370 CPU
-                                                │
-                                           KICKGWX Gateway
-                                           X'75' socket event loop
-                                                │
-                                           KICKS / CICS
-                                           KIKPCP LINK dispatch
-                                                │
-                                           GWDEMO / KLASTCCG / ...
-                                           CICS programs in KIKRPL
-```
+![System Architecture](docs/architecture.svg)
 
 ## Protocol
 
