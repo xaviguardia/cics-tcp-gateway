@@ -66,4 +66,33 @@ ONE      DC    F'1'
 TWO      DC    F'2'
 BUFFER   DS    CL256
          LTORG
-         END   X75CALL
+***********************************************************************
+* STIMWT - callable STIMER WAIT wrapper.                              *
+*                                                                     *
+* C prototype:                                                        *
+*   void stimwt(int centiseconds);                                    *
+*                                                                     *
+* Sleeps the MVS task for the specified number of 1/100 second units. *
+* stimwt(1) = 10 ms.  Properly yields CPU to Hercules host.          *
+***********************************************************************
+STIMWT   CSECT
+         ENTRY STIMWT
+         USING STIMWT,12
+         STM   14,12,12(13)
+         LR    12,15
+         LA    10,SVSAVE2
+         ST    13,4(10)
+         ST    10,8(13)
+         LR    13,10
+         LR    11,1
+         L     2,0(11)
+         ST    2,SVINTV
+         STIMER WAIT,BINTVL=SVINTV
+         L     13,4(13)
+         L     14,12(13)
+         LM    0,12,20(13)
+         BR    14
+SVSAVE2  DS    18F
+SVINTV   DC    F'1'
+         LTORG
+         END

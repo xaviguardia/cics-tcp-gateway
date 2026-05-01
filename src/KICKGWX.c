@@ -21,10 +21,11 @@
 #define MAX_REQ 4096
 #define RSP_LEN 29
 #define MAX_SESSIONS 8
-#define POLL_YIELD 200
+#define POLL_WAIT_CS 1
 
 extern int x75call(int func, int aux1, int aux2, char *buf,
                    int len, int mode);
+extern void stimwt(int centiseconds);
 extern vconstb5;
 extern kikaica;
 
@@ -557,7 +558,6 @@ int main(int argc, char **argv)
     int clifd;
     int rc;
     int did_work;
-    volatile int yield;
 
     port = GW_PORT_DEC;
     if (argc > 1) {
@@ -645,12 +645,9 @@ int main(int argc, char **argv)
         }
         session_compact();
 
-        /* yield: DIAG X'75' traps cost real host time, use them
-         * as a delay mechanism when no work was done */
+        /* yield CPU via MVS STIMER WAIT when idle */
         if (!did_work) {
-            for (yield = 0; yield < POLL_YIELD; yield++) {
-                x75call(11, 99, 0, 0, 0, 0);
-            }
+            stimwt(POLL_WAIT_CS);
         }
     }
 

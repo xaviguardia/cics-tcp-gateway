@@ -78,7 +78,36 @@ ONE      DC    F'1'
 TWO      DC    F'2'
 BUFFER   DS    CL256
          LTORG
-         END   X75CALL
+***********************************************************************
+* STIMWT - callable STIMER WAIT wrapper.                              *
+*                                                                     *
+* C prototype:                                                        *
+*   void stimwt(int centiseconds);                                    *
+*                                                                     *
+* Sleeps the MVS task for the specified number of 1/100 second units. *
+* stimwt(1) = 10 ms.  Properly yields CPU to Hercules host.          *
+***********************************************************************
+STIMWT   CSECT
+         ENTRY STIMWT
+         USING STIMWT,12
+         STM   14,12,12(13)
+         LR    12,15
+         LA    10,SVSAVE2
+         ST    13,4(10)
+         ST    10,8(13)
+         LR    13,10
+         LR    11,1
+         L     2,0(11)
+         ST    2,SVINTV
+         STIMER WAIT,BINTVL=SVINTV
+         L     13,4(13)
+         L     14,12(13)
+         LM    0,12,20(13)
+         BR    14
+SVSAVE2  DS    18F
+SVINTV   DC    F'1'
+         LTORG
+         END
 /*
 //KICKGWX  EXEC PROC=KGCC,LOPTS='XREF,MAP',NAME=KICKGWX,
 //             GCCPREF=SYS1,PDPPREF=PDPCLIB,
@@ -107,10 +136,11 @@ BUFFER   DS    CL256
 #define MAX_REQ 4096
 #define RSP_LEN 29
 #define MAX_SESSIONS 8
-#define POLL_YIELD 200
+#define POLL_WAIT_CS 1
 
 extern int x75call(int func, int aux1, int aux2, char *buf,
                    int len, int mode);
+extern void stimwt(int centiseconds);
 extern vconstb5;
 extern kikaica;
 
@@ -644,7 +674,6 @@ int main(int argc, char **argv)
     int clifd;
     int rc;
     int did_work;
-    volatile int yield;
 
     port = GW_PORT_DEC;
     if (argc > 1) {
@@ -732,12 +761,9 @@ int main(int argc, char **argv)
         }
         session_compact();
 
-        /* yield: DIAG X'75' traps cost real host time, use them
-         * as a delay mechanism when no work was done */
+        /* yield CPU via MVS STIMER WAIT when idle */
         if (!did_work) {
-            for (yield = 0; yield < POLL_YIELD; yield++) {
-                x75call(11, 99, 0, 0, 0, 0);
-            }
+            stimwt(POLL_WAIT_CS);
         }
     }
 
